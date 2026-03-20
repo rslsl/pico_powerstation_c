@@ -2269,25 +2269,37 @@ static void _render_safe_splash(Display *d) {
 // ── Main render dispatcher (Core1) ────────────────────────────
 static void _render_poweroff_splash(Display *d, const FullUiSnapshot *rs) {
     char buf[24];
+    uint16_t accent = rs->blink ? D_ORANGE : UI_NEON_AMB;
     uint32_t remain_s = (rs->poweroff_remaining_ms + 999u) / 1000u;
+    uint32_t countdown_total_ms = (uint32_t)(BTN_POWEROFF_MS - BTN_LONG_MS);
+    int fill;
     if (remain_s == 0) remain_s = 1;
 
-    disp_fill(d, D_BG);
-    disp_fill_rect(d, 0, 0, ST7789_W, 30, D_RED);
-    disp_text_center_safe(d, 8, "POWER OFF", D_WHITE);
-    _draw_icon(d, 102, 38, &UI_ICON_LOCK, D_ORANGE, 3);
-    disp_text_center_safe(d, 58, "Keep holding OK", D_TEXT);
-    disp_text_center_safe(d, 76, "Release to cancel", D_SUBTEXT);
+    _draw_grid_background(d);
+    _draw_screen_title(d, "POWER OFF", NULL);
+
+    _draw_panel_box(d, 24, 42, 192, 68, UI_BLUE_DIM, accent, UI_BG_PANEL, true);
+    _draw_icon(d, 96, 50, &UI_ICON_LOCK, accent, 2);
+    _text_center_box(d, 24, 192, 82, "Keep holding OK", D_WHITE, 1);
+    _text_center_box(d, 24, 192, 96, "Release to cancel", D_SUBTEXT, 1);
+
+    _text_center_box(d, 24, 192, 124, "COUNTDOWN", D_SUBTEXT, 1);
 
     snprintf(buf, sizeof(buf), "%lus", (unsigned long)remain_s);
-    disp_text2x(d, 88, 118, buf, D_ORANGE);
+    _draw_panel_box(d, 56, 136, 128, 46, UI_BLUE_DIM, accent, UI_BG_PANEL2, true);
+    _text_center_box(d, 56, 128, 148, buf, accent, 2);
 
-    disp_rect(d, 36, 172, 168, 18, D_SUBTEXT);
-    int fill = (int)((168.0f * (float)(BTN_POWEROFF_MS - rs->poweroff_remaining_ms)) / (float)BTN_POWEROFF_MS);
-    if (fill > 2) disp_fill_rect(d, 37, 173, fill - 2, 16, D_ORANGE);
+    _draw_panel_box(d, 24, 192, 192, 36, UI_BLUE_DIM, accent, UI_BG_PANEL, false);
+    disp_fill_rect(d, 36, 204, 168, 12, UI_BG_PANEL2);
+    disp_rect(d, 36, 204, 168, 12, accent);
+    fill = (countdown_total_ms > 0)
+        ? (int)((168.0f * (float)(countdown_total_ms - rs->poweroff_remaining_ms)) /
+                (float)countdown_total_ms)
+        : 0;
+    if (fill > 2) disp_fill_rect(d, 37, 205, fill - 2, 10, accent);
 
-    disp_text_center_safe(d, 206, "System will shut down", D_TEXT);
-    disp_text_center_safe(d, 224, "Hold button until countdown ends", D_SUBTEXT);
+    _text_center_box(d, 24, 192, 238, "System will shut down", D_TEXT, 1);
+    _text_center_box(d, 24, 192, 252, "when the bar is full", D_SUBTEXT, 1);
 }
 
 void ui_render(UI *ui) {
