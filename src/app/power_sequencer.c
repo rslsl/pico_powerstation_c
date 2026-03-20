@@ -12,11 +12,11 @@
 void pseq_latch(PowerSeq *ps) {
     memset(ps, 0, sizeof(*ps));
 
-    // Assert the hold relay first so the board can keep itself powered.
+    // Keep every relay inactive first so power rails do not short immediately
+    // on boot while the controller waits out the bootstrap delay.
     gpio_init(GPIO_PWR_LATCH);
     gpio_set_dir(GPIO_PWR_LATCH, GPIO_OUT);
-    gpio_put(GPIO_PWR_LATCH, MOSFET_ON);
-    sleep_ms(PWR_HOLD_ASSERT_MS);
+    gpio_put(GPIO_PWR_LATCH, MOSFET_OFF);
 
     // Bring the remaining relays into a safe inactive state.
     const uint8_t relays[] = {
@@ -27,6 +27,14 @@ void pseq_latch(PowerSeq *ps) {
         gpio_set_dir(relays[i], GPIO_OUT);
         gpio_put(relays[i], MOSFET_OFF);
     }
+
+    // Delay before asserting SYSTEM_HOLD so the bootstrap relay does not
+    // immediately close the power line on input power application.
+    sleep_ms(PWR_BOOTSTRAP_DELAY_MS);
+
+    // Assert the hold relay so the board can keep itself powered.
+    gpio_put(GPIO_PWR_LATCH, MOSFET_ON);
+    sleep_ms(PWR_HOLD_ASSERT_MS);
 
     ps->latched = true;
 }
@@ -63,12 +71,7 @@ void pseq_self_off(PowerSeq *ps, const char *msg) {
 }
 
 void pseq_user_poweroff(PowerSeq *ps, Buzzer *bz) {
+    (void)bz;
     printf("[SEQ] user power-off\n");
-    if (bz && bz->enabled) {
-        buz_play(bz, BUZ_SHUTDOWN);
-        sleep_ms(2000);
-    } else {
-        sleep_ms(500);
-    }
     pseq_self_off(ps, NULL);
 }

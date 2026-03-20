@@ -39,11 +39,57 @@ static const PortId _PORT_MENU_IDS[] = {
     PORT_DC_OUT, PORT_USB_PD, PORT_FAN
 };
 #define PORT_MENU_COUNT ((int)(sizeof(_PORT_MENU_IDS) / sizeof(_PORT_MENU_IDS[0])))
+#define POWEROFF_AUDIO_CUE1_MS  250u
+#define POWEROFF_AUDIO_CUE2_MS 1050u
+#define POWEROFF_AUDIO_CUE3_MS 1850u
 
 static void _rs_publish(UI *ui);
 
 static bool _can_hold_poweroff(UiState s) {
     return s == S_MAIN || s == S_STATS || s == S_BATTERY || s == S_DIAGNOSTICS;
+}
+
+static void _poweroff_audio_reset(UI *ui) {
+    ui->poweroff_armed = false;
+    ui->poweroff_arm_ms = 0;
+    ui->poweroff_audio_started = false;
+    ui->poweroff_audio_stage = 0;
+}
+
+static void _poweroff_audio_tick(UI *ui, uint32_t held_ms) {
+    uint32_t countdown_ms;
+    BuzPattern pat = BUZ_COUNT;
+
+    if (!_can_hold_poweroff(ui->state) || held_ms < (uint32_t)BTN_LONG_MS) {
+        _poweroff_audio_reset(ui);
+        return;
+    }
+    if (held_ms >= (uint32_t)BTN_POWEROFF_MS) {
+        return;
+    }
+
+    if (!ui->poweroff_audio_started) {
+        ui->poweroff_audio_started = true;
+        ui->poweroff_audio_stage = 0;
+        if (ui->buz) buz_play(ui->buz, BUZ_POWEROFF_READY);
+        return;
+    }
+
+    countdown_ms = held_ms - (uint32_t)BTN_LONG_MS;
+    if (ui->poweroff_audio_stage < 1 && countdown_ms >= POWEROFF_AUDIO_CUE1_MS) {
+        ui->poweroff_audio_stage = 1;
+        pat = BUZ_POWEROFF_COUNT_3;
+    } else if (ui->poweroff_audio_stage < 2 && countdown_ms >= POWEROFF_AUDIO_CUE2_MS) {
+        ui->poweroff_audio_stage = 2;
+        pat = BUZ_POWEROFF_COUNT_2;
+    } else if (ui->poweroff_audio_stage < 3 && countdown_ms >= POWEROFF_AUDIO_CUE3_MS) {
+        ui->poweroff_audio_stage = 3;
+        pat = BUZ_POWEROFF_COUNT_1;
+    }
+
+    if (pat < BUZ_COUNT && ui->buz) {
+        buz_play(ui->buz, pat);
+    }
 }
 
 static const char *_port_menu_label(int idx) {
@@ -371,6 +417,7 @@ void ui_poll(UI *ui) {
                 if (pressed && !ui->ok_btn_held) {
                     ui->ok_btn_held = true;
                     ui->ok_btn_press_ms = now;
+                    _poweroff_audio_reset(ui);
                 } else if (!pressed && ui->ok_btn_held) {
                     ui->ok_btn_held = false;
                     uint32_t dur = now - ui->ok_btn_press_ms;
@@ -381,7 +428,7 @@ void ui_poll(UI *ui) {
                     } else {
                         _click(ui);
                     }
-                    ui->poweroff_armed = false;
+                    _poweroff_audio_reset(ui);
                 }
             } else if (pressed) {
                 nav_step += (i == 0) ? -1 : +1;
@@ -434,20 +481,22 @@ void ui_poll(UI *ui) {
             held >= (uint32_t)BTN_LONG_MS) {
             _confirm_open(ui, UI_CONFIRM_RESET_LATCH, 0);
             ui->ok_btn_held = false;
+            _poweroff_audio_reset(ui);
             return;
         }
         if (ui->confirm_active) {
+            _poweroff_audio_reset(ui);
             ui->dirty = true;
             return;
         }
         if (_can_hold_poweroff(ui->state) && held >= (uint32_t)BTN_LONG_MS) {
+            _poweroff_audio_tick(ui, held);
             ui->dirty = true;
         }
         if (_can_hold_poweroff(ui->state) && held >= (uint32_t)BTN_POWEROFF_MS) {
             if (!ui->poweroff_armed) {
                 ui->poweroff_armed = true;
                 ui->poweroff_arm_ms = now;
-                if (ui->buz) buz_play(ui->buz, BUZ_ALARM_WARN);
             }
             if (ui->pseq) {
                 printf("[UI] user power-off\n");

@@ -61,7 +61,7 @@ static void _buz_reset_state(Buzzer *bz) {
     bz->active_pattern = BUZ_COUNT;
 }
 
-static const uint16_t _PAT_BOOT[]       = {70, 30, 70, 30, 110, 0};
+static const uint16_t _PAT_BOOT[]       = {50, 16, 50, 16, 50, 18, 70, 18, 110, 0};
 static const uint16_t _PAT_SOC_WARN[]   = {200, 200, 200, 600, 0};
 static const uint16_t _PAT_SOC_CUT[]    = {100, 80, 100, 80, 100, 80, 100, 600, 0};
 static const uint16_t _PAT_TEMP_WARN[]  = {150, 100, 150, 600, 0};
@@ -73,11 +73,18 @@ static const uint16_t _PAT_CLICK[]      = {30, 0};
 static const uint16_t _PAT_LONG[]       = {60, 0};
 static const uint16_t _PAT_ALARM_CRIT[] = {50, 40, 50, 40, 50, 40, 50, 40, 50, 600, 0};
 static const uint16_t _PAT_ALARM_WARN[] = {120, 120, 120, 500, 0};
-static const uint16_t _PAT_SHUTDOWN[]   = {2000, 0};
+static const uint16_t _PAT_POWEROFF_READY[]   = {55, 45, 70, 0};
+static const uint16_t _PAT_POWEROFF_COUNT_3[] = {45, 10, 55, 0};
+static const uint16_t _PAT_POWEROFF_COUNT_2[] = {45, 10, 55, 0};
+static const uint16_t _PAT_POWEROFF_COUNT_1[] = {45, 10, 55, 0};
 
-static const uint16_t _TONES_BOOT[]      = {1319, 1568, 1976, 0};
+static const uint16_t _TONES_BOOT[]      = {1319, 1661, 1976, 2349, 2637, 0};
 static const uint16_t _TONES_CHG_DONE[]  = {1175, 1397, 1760, 0};
 static const uint16_t _TONES_CHG_START[] = {1046, 1397, 0};
+static const uint16_t _TONES_POWEROFF_READY[]   = {1568, 1175, 0};
+static const uint16_t _TONES_POWEROFF_COUNT_3[] = {2093, 1760, 0};
+static const uint16_t _TONES_POWEROFF_COUNT_2[] = {1661, 1397, 0};
+static const uint16_t _TONES_POWEROFF_COUNT_1[] = {1319, 988, 0};
 
 static const BuzPatternDef _PATTERNS[BUZ_COUNT] = {
     { _PAT_BOOT,       _TONES_BOOT,      1319 },
@@ -92,7 +99,10 @@ static const BuzPatternDef _PATTERNS[BUZ_COUNT] = {
     { _PAT_LONG,       NULL,             1175 },
     { _PAT_ALARM_CRIT, NULL,             1865 },
     { _PAT_ALARM_WARN, NULL,             1480 },
-    { _PAT_SHUTDOWN,   NULL,              440 },
+    { _PAT_POWEROFF_READY,   _TONES_POWEROFF_READY,   1568 },
+    { _PAT_POWEROFF_COUNT_3, _TONES_POWEROFF_COUNT_3, 2093 },
+    { _PAT_POWEROFF_COUNT_2, _TONES_POWEROFF_COUNT_2, 1661 },
+    { _PAT_POWEROFF_COUNT_1, _TONES_POWEROFF_COUNT_1, 1319 },
 };
 
 static uint16_t _buz_pattern_hz(BuzPattern p, uint8_t pat_idx) {

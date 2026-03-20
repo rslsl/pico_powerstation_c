@@ -2,7 +2,7 @@
 // main.c вЂ” PowerStation 3S2P В· RP2040 В· v5.0
 //
 // РџРѕСЃР»С–РґРѕРІРЅС–СЃС‚СЊ РІРІС–РјРєРЅРµРЅРЅСЏ:
-//   1. pseq_latch()        вЂ” РџР•Р РЁРђ С–РЅСЃС‚СЂСѓРєС†С–СЏ: GPIO_PWR_LATCH LOW в†’ MOSFET ON в†’ MCU self-powered
+//   1. pseq_latch()        вЂ” relay GPIO safe OFF, bootstrap delay, GPIO_PWR_LATCH LOW в†’ MCU self-powered
 //   2. _init_all()         вЂ” РїРѕРІРЅР° С–РЅС–С†С–Р°Р»С–Р·Р°С†С–СЏ РїРµСЂРёС„РµСЂС–С—
 //   3. _startup_validate() вЂ” РїРµСЂРµРІС–СЂРєР° Р±Р°С‚Р°СЂРµС— (РЅР°РїСЂСѓРіР°, РєР»С–С‚РёРЅРё, РґР°С‚С‡РёРєРё)
 //   4. pseq_resolve()      в†’ BootMode:
@@ -492,14 +492,16 @@ int main(void) {
 #if DEBUG_USB_BRINGUP
     _relays_safe_init_for_usb_debug();
 #else
-    // РџРµСЂС€Р° С–РЅСЃС‚СЂСѓРєС†С–СЏ: GPIO_PWR_LATCH LOW в†’ MOSFET ON в†’ MCU self-powered.
+    // First instruction: keep relays OFF, wait bootstrap delay, then latch SYSTEM_HOLD.
     pseq_latch(&g_pseq);
 #endif
     _early_console_init();
 #if DEBUG_USB_BRINGUP
     printf("[SEQ] DEBUG_USB_BRINGUP=1: pseq_latch skipped, relays forced OFF\n");
+#else
+    printf("[SEQ] SYSTEM_HOLD asserted on GP%u after %ums bootstrap delay\n",
+           GPIO_PWR_LATCH, PWR_BOOTSTRAP_DELAY_MS);
 #endif
-    printf("[SEQ] SYSTEM_HOLD asserted on GP%u\n", GPIO_PWR_LATCH);
 
     // в”Ђв”Ђ 2. INIT в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     _init_all();

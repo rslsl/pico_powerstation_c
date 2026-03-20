@@ -167,6 +167,8 @@ typedef struct {
     // Power-off long-hold tracking
     bool     poweroff_armed;
     uint32_t poweroff_arm_ms;
+    bool     poweroff_audio_started;
+    uint8_t  poweroff_audio_stage;
 
     // P0.3 + P1.7: render snapshot + its lock
     FullUiSnapshot rs;
