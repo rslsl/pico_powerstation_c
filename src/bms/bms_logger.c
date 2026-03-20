@@ -146,6 +146,17 @@ void log_flush_header(BmsLogger *l) {
     l->_hdr_slot = next;
 }
 
+void log_reset(BmsLogger *l) {
+    if (!l || g_brownout) return;
+    uint8_t next = (l->_hdr_slot == 0) ? 1 : 0;
+    l->write_idx = 0;
+    l->total_events = 0;
+    l->_hdr_seq++;
+    _header_write(next, l->_hdr_seq, 0, 0);
+    l->_hdr_slot = next;
+    printf("[LOG] reset\n");
+}
+
 static uint32_t _ts(void) {
     return (uint32_t)(to_ms_since_boot(get_absolute_time()) / 1000u);
 }

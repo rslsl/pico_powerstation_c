@@ -31,10 +31,11 @@
 // ── Parent state table ────────────────────────────────────────
 static const UiState _PARENT[S_COUNT] = {
     S_MAIN, S_MAIN, S_MAIN, S_ADVANCED, S_MAIN,
-    S_PORTS, S_UI_CFG, S_ADVANCED, S_ADVANCED, S_ADVANCED,
+    S_PORTS, S_UI_CFG, S_UI_CFG, S_UI_CFG, S_UI_CFG,
+    S_UI_CFG, S_ADVANCED, S_ADVANCED, S_ADVANCED,
 };
-static const bool _IS_INFO[S_COUNT] = {1,1,1,0,0,0,0,0,0,0};
-static const bool _IS_MENU[S_COUNT] = {0,0,0,0,1,1,1,0,0,0};
+static const bool _IS_INFO[S_COUNT] = {1,1,1,0,0,0,0,0,0,0,0,0,0,0};
+static const bool _IS_MENU[S_COUNT] = {0,0,0,0,1,1,1,1,1,1,1,0,0,0};
 static const PortId _PORT_MENU_IDS[] = {
     PORT_DC_OUT, PORT_USB_PD, PORT_FAN
 };
@@ -101,7 +102,93 @@ static const char *_port_menu_label(int idx) {
     }
 }
 
+static int _menu_len(UiState s) {
+    switch (s) {
+        case S_PORTS:    return PORT_MENU_COUNT + 1;
+        case S_UI_CFG:   return 7;
+        case S_BAT_CFG:  return 5;
+        case S_TEMP_CFG: return 8;
+        case S_CAL_CFG:  return 2;
+        case S_DATA_CFG: return 3;
+        case S_ADVANCED: return 4;
+        default:         return 1;
+    }
+}
+
+static bool _settings_apply(UI *ui, SystemSettings *cfg, bool reconfigure_sensors, const char *toast) {
+    const SystemSettings *saved;
+
+    if (!settings_store(cfg)) {
+        ui_toast(ui, "Settings save failed");
+        return false;
+    }
+
+    saved = settings_get();
+    ui->brightness = saved->ui_brightness;
+    ui->buzzer_en = saved->buzzer_en != 0;
+    if (ui->buz) buz_set_enabled(ui->buz, ui->buzzer_en);
+    if (!ui->screensaver_active) {
+        st7789_set_brightness(ui->disp, ui->brightness);
+    }
+    if (ui->apply_settings) {
+        ui->apply_settings(reconfigure_sensors);
+    }
+    if (toast && toast[0]) ui_toast(ui, toast);
+    else _rs_publish(ui);
+    return true;
+}
+
+static bool _adjust_setting(UI *ui, int dir) {
+    SystemSettings cfg;
+    int sel = ui->cur[ui->state];
+
+    settings_copy(&cfg);
+
+    switch (ui->state) {
+        case S_UI_CFG:
+            if (sel == 0) {
+                int b = (int)cfg.ui_brightness + (dir > 0 ? 10 : -10);
+                if (b < 10) b = 10;
+                if (b > 100) b = 100;
+                cfg.ui_brightness = (uint8_t)b;
+                return _settings_apply(ui, &cfg, false, NULL);
+            }
+            return false;
+
+        case S_BAT_CFG:
+            if (sel == 0) cfg.capacity_ah += (dir > 0 ? 0.5f : -0.5f);
+            else if (sel == 1) cfg.vbat_warn_v += (dir > 0 ? 0.1f : -0.1f);
+            else if (sel == 2) cfg.vbat_cut_v += (dir > 0 ? 0.1f : -0.1f);
+            else if (sel == 3) cfg.cell_warn_v += (dir > 0 ? 0.01f : -0.01f);
+            else if (sel == 4) cfg.cell_cut_v += (dir > 0 ? 0.01f : -0.01f);
+            else return false;
+            return _settings_apply(ui, &cfg, false, NULL);
+
+        case S_TEMP_CFG:
+            if (sel == 0) cfg.temp_bat_warn_c += (dir > 0 ? 1.0f : -1.0f);
+            else if (sel == 1) cfg.temp_bat_buzz_c += (dir > 0 ? 1.0f : -1.0f);
+            else if (sel == 2) cfg.temp_bat_safe_c += (dir > 0 ? 1.0f : -1.0f);
+            else if (sel == 3) cfg.temp_bat_cut_c += (dir > 0 ? 1.0f : -1.0f);
+            else if (sel == 4) cfg.temp_bat_charge_min_c += (dir > 0 ? 1.0f : -1.0f);
+            else if (sel == 5) cfg.temp_inv_warn_c += (dir > 0 ? 1.0f : -1.0f);
+            else if (sel == 6) cfg.temp_inv_safe_c += (dir > 0 ? 1.0f : -1.0f);
+            else if (sel == 7) cfg.temp_inv_cut_c += (dir > 0 ? 1.0f : -1.0f);
+            else return false;
+            return _settings_apply(ui, &cfg, true, NULL);
+
+        case S_CAL_CFG:
+            if (sel == 0) cfg.shunt_dis_mohm += (dir > 0 ? 0.01f : -0.01f);
+            else if (sel == 1) cfg.shunt_chg_mohm += (dir > 0 ? 0.01f : -0.01f);
+            else return false;
+            return _settings_apply(ui, &cfg, true, NULL);
+
+        default:
+            return false;
+    }
+}
+
 static void _confirm_open(UI *ui, UiConfirmAction kind, int arg) {
+    ui->edit_active = false;
     ui->confirm_active = true;
     ui->confirm_kind = (uint8_t)kind;
     ui->confirm_arg = (int8_t)arg;
@@ -129,6 +216,21 @@ static void _confirm_apply(UI *ui) {
             ui_toast(ui, "Latched faults reset");
         } else {
             ui_toast(ui, "Fault still active");
+        }
+    } else if ((UiConfirmAction)ui->confirm_kind == UI_CONFIRM_CLEAR_LOG) {
+        if (ui->logger) {
+            log_reset(ui->logger);
+            ui->ev_scroll = 0;
+            ui_toast(ui, "Event log cleared");
+        }
+    } else if ((UiConfirmAction)ui->confirm_kind == UI_CONFIRM_RESET_STATS) {
+        ui->confirm_kind = UI_CONFIRM_RESET_STATS_FINAL;
+        _rs_publish(ui);
+        return;
+    } else if ((UiConfirmAction)ui->confirm_kind == UI_CONFIRM_RESET_STATS_FINAL) {
+        if (ui->stats) {
+            stats_reset(ui->stats);
+            ui_toast(ui, "Lifetime stats reset");
         }
     }
 
@@ -224,6 +326,8 @@ static void _rs_publish(UI *ui) {
     rs->confirm_active = ui->confirm_active;
     rs->confirm_kind = ui->confirm_kind;
     rs->confirm_arg = ui->confirm_arg;
+    settings_copy(&rs->settings);
+    rs->edit_active = ui->edit_active;
     if (ui->ok_btn_held && _can_hold_poweroff(ui->state)) {
         uint32_t now = to_ms_since_boot(get_absolute_time());
         uint32_t held = now - ui->ok_btn_press_ms;
@@ -244,7 +348,10 @@ static void _rs_publish(UI *ui) {
 // ── Init ─────────────────────────────────────────────────────
 void ui_init(UI *ui, Display *d, PowerControl *pwr, PowerSeq *pseq,
              Buzzer *buz, BatSnapshot *snap, Protection *prot,
-             BmsStats *stats, BmsLogger *logger) {
+             BmsStats *stats, BmsLogger *logger,
+             UiSettingsApplyFn apply_settings) {
+    const SystemSettings *cfg = settings_get();
+
     memset(ui, 0, sizeof(*ui));
     ui->disp       = d;
     ui->pwr        = pwr;
@@ -254,10 +361,11 @@ void ui_init(UI *ui, Display *d, PowerControl *pwr, PowerSeq *pseq,
     ui->prot       = prot;
     ui->stats      = stats;
     ui->logger     = logger;
+    ui->apply_settings = apply_settings;
     ui->state      = S_MAIN;
     ui->dirty      = true;
-    ui->brightness = UI_BL_ACTIVE_PCT;
-    ui->buzzer_en  = true;
+    ui->brightness = cfg->ui_brightness;
+    ui->buzzer_en  = cfg->buzzer_en != 0;
     ui->soc_anim   = snap ? snap->soc : 50.0f;
     ui->blink      = true;
     ui->last_activity_ms = to_ms_since_boot(get_absolute_time());
@@ -272,6 +380,9 @@ void ui_init(UI *ui, Display *d, PowerControl *pwr, PowerSeq *pseq,
 
     ui->render_lock_num = spin_lock_claim_unused(true);
     ui->render_lock     = spin_lock_instance(ui->render_lock_num);
+
+    if (ui->buz) buz_set_enabled(ui->buz, ui->buzzer_en);
+    st7789_set_brightness(ui->disp, ui->brightness);
 
     _rs_publish(ui);
 }
@@ -301,6 +412,7 @@ void ui_toast(UI *ui, const char *msg) {
 // ── Navigation ───────────────────────────────────────────────
 static void _go(UI *ui, UiState s) {
     ui->state = s;
+    ui->edit_active = false;
     if (ui->buz) buz_play(ui->buz, BUZ_KEY_CLICK);
     _rs_publish(ui);
 }
@@ -356,6 +468,11 @@ static void _click(UI *ui) {
         _confirm_apply(ui);
         return;
     }
+    if (ui->edit_active) {
+        ui->edit_active = false;
+        _rs_publish(ui);
+        return;
+    }
     switch (ui->state) {
         case S_MAIN: case S_STATS: case S_BATTERY: case S_DIAGNOSTICS:
             _go(ui, S_PORTS); break;
@@ -368,11 +485,32 @@ static void _click(UI *ui) {
         case S_UI_CFG: {
             int c = ui->cur[S_UI_CFG];
             if (c == 0) {
-                ui->brightness += 25; if (ui->brightness > 100) ui->brightness = 20;
-                if (!ui->screensaver_active) st7789_set_brightness(ui->disp, ui->brightness);
-            } else if (c == 1) { ui->buzzer_en = !ui->buzzer_en; buz_set_enabled(ui->buz, ui->buzzer_en); }
-            else { _go(ui, S_ADVANCED); return; }
-            _rs_publish(ui); break;
+                ui->edit_active = true;
+                _rs_publish(ui);
+            } else if (c == 1) {
+                SystemSettings cfg;
+                settings_copy(&cfg);
+                cfg.buzzer_en = cfg.buzzer_en ? 0u : 1u;
+                _settings_apply(ui, &cfg, false, NULL);
+            } else if (c == 2) _go(ui, S_BAT_CFG);
+            else if (c == 3) _go(ui, S_TEMP_CFG);
+            else if (c == 4) _go(ui, S_CAL_CFG);
+            else if (c == 5) _go(ui, S_DATA_CFG);
+            else _go(ui, S_ADVANCED);
+            break;
+        }
+        case S_BAT_CFG:
+        case S_TEMP_CFG:
+        case S_CAL_CFG:
+            ui->edit_active = true;
+            _rs_publish(ui);
+            break;
+        case S_DATA_CFG: {
+            int c = ui->cur[S_DATA_CFG];
+            if (c == 0) _go(ui, S_EVENTS);
+            else if (c == 1) _confirm_open(ui, UI_CONFIRM_CLEAR_LOG, 0);
+            else if (c == 2) _confirm_open(ui, UI_CONFIRM_RESET_STATS, 0);
+            break;
         }
         case S_ADVANCED: {
             int c = ui->cur[S_ADVANCED];
@@ -383,14 +521,21 @@ static void _click(UI *ui) {
             else _rs_publish(ui);
             break;
         }
+        case S_EVENTS:
         case S_HISTORY:
-            ui->hist_page = (ui->hist_page + 1) % 3;
-            _rs_publish(ui); break;
+        case S_I2C_SCAN:
+            _go(ui, _PARENT[ui->state]);
+            break;
         default: break;
     }
 }
 
 static void _long_press(UI *ui) {
+    if (ui->edit_active) {
+        ui->edit_active = false;
+        _rs_publish(ui);
+        return;
+    }
     if (ui->confirm_active) {
         _confirm_close(ui);
         return;
@@ -445,15 +590,15 @@ void ui_poll(UI *ui) {
         if (nav_step == 0) {
             // Navigation input cancels confirmation without moving focus.
         } else
-        if (_IS_INFO[ui->state]) {
+        if (ui->edit_active) {
+            _adjust_setting(ui, nav_step > 0 ? 1 : -1);
+        } else if (_IS_INFO[ui->state]) {
             int s = (int)ui->state + (nav_step > 0 ? 1 : -1);
             if (s < S_MAIN)        s = S_BATTERY;
             if (s > S_BATTERY)     s = S_MAIN;
             _go(ui, (UiState)s);
         } else if (_IS_MENU[ui->state]) {
-            int mx = (ui->state == S_PORTS)    ? PORT_MENU_COUNT + 1 :
-                     (ui->state == S_UI_CFG)   ? 3 :
-                     (ui->state == S_ADVANCED) ? 4 : 1;
+            int mx = _menu_len(ui->state);
             int c = (int)ui->cur[ui->state] + (nav_step > 0 ? 1 : -1);
             if (c < 0)  c = mx - 1;
             if (c >= mx) c = 0;
@@ -1111,6 +1256,15 @@ static void _draw_footer_hint(Display *d, const char *left, const char *right) {
     if (right && right[0]) disp_text_right_safe(d, 264, right, D_SUBTEXT);
 }
 
+static void _draw_menu_footer(Display *d, const FullUiSnapshot *rs,
+                              const char *normal_left, const char *normal_right) {
+    if (rs->edit_active) {
+        _draw_footer_hint(d, "UP/DN=ADJUST", "OK/HOLD=EXIT");
+    } else {
+        _draw_footer_hint(d, normal_left, normal_right);
+    }
+}
+
 static void _draw_confirm_overlay(Display *d, const FullUiSnapshot *rs) {
     const char *lines[3];
     char prompt[32];
@@ -1122,6 +1276,12 @@ static void _draw_confirm_overlay(Display *d, const FullUiSnapshot *rs) {
         lines[0] = prompt;
     } else if ((UiConfirmAction)rs->confirm_kind == UI_CONFIRM_RESET_LATCH) {
         lines[0] = "RESET LATCHED FAULTS?";
+    } else if ((UiConfirmAction)rs->confirm_kind == UI_CONFIRM_CLEAR_LOG) {
+        lines[0] = "CLEAR EVENT LOG?";
+    } else if ((UiConfirmAction)rs->confirm_kind == UI_CONFIRM_RESET_STATS) {
+        lines[0] = "RESET LIFETIME STATS?";
+    } else if ((UiConfirmAction)rs->confirm_kind == UI_CONFIRM_RESET_STATS_FINAL) {
+        lines[0] = "ERASE STATS PERMANENTLY?";
     } else {
         lines[0] = "CONFIRM ACTION?";
     }
@@ -1240,10 +1400,11 @@ static void _draw_compact_center_card(Display *d, int x, int y, int w, int h,
 }
 
 static void _draw_cell_overview_card(Display *d, int x, int y, int w, int h,
-                                     const char *label, float voltage) {
+                                     const char *label, float voltage,
+                                     float cell_warn_v, float cell_cut_v) {
     float frac = _clampf_ui((voltage - 3.0f) / 1.2f, 0.0f, 1.0f);
-    uint16_t col = voltage < CELL_CUT_V ? D_RED :
-                   voltage < CELL_WARN_V ? D_ORANGE : D_GREEN;
+    uint16_t col = voltage < cell_cut_v ? D_RED :
+                   voltage < cell_warn_v ? D_ORANGE : D_GREEN;
 
     _draw_panel_box(d, x, y, w, h, UI_BLUE_DIM, col, UI_BG_PANEL, false);
     _text_center_box(d, x, w, y + 14, label, D_WHITE, 1);
@@ -1515,8 +1676,8 @@ static void _render_battery_v2(Display *d, const FullUiSnapshot *rs) {
         float frac = (cell_v[i] - 3.0f) / 1.2f;
         if (frac < 0.0f) frac = 0.0f;
         if (frac > 1.0f) frac = 1.0f;
-        uint16_t col = cell_v[i] < CELL_CUT_V  ? D_RED :
-                       cell_v[i] < CELL_WARN_V ? D_ORANGE : D_GREEN;
+        uint16_t col = cell_v[i] < rs->settings.cell_cut_v ? D_RED :
+                       cell_v[i] < rs->settings.cell_warn_v ? D_ORANGE : D_GREEN;
         int bx = bar_xs[i];
 
         // Cell name above bar (centered, y=79 is 13px above bars at 92)
@@ -1673,7 +1834,7 @@ static void _render_ui_cfg(Display *d, const FullUiSnapshot *rs) {
         disp_text_safe(d, D_SAFE_LEFT + 18, y+7, items[i].lbl, (i==2) ? D_ACCENT : D_TEXT);
         disp_text_right_safe(d, y+7, items[i].val, D_GREEN);
     }
-    disp_footer(d, "Click=change", "Hold OK=back");
+    disp_footer(d, "OK=change", "Hold OK=back");
 }
 
 static void _render_advanced(Display *d, const FullUiSnapshot *rs) {
@@ -1687,7 +1848,7 @@ static void _render_advanced(Display *d, const FullUiSnapshot *rs) {
         _draw_icon(d, D_SAFE_LEFT, y + 6, icons[i], D_ACCENT, 1);
         disp_text_safe(d, D_SAFE_LEFT + 18, y+7, items[i], D_ACCENT);
     }
-    disp_footer(d, "Click=open", "Hold OK=back");
+    disp_footer(d, "OK=open", "Hold OK=back");
 }
 
 #pragma GCC diagnostic pop
@@ -1710,7 +1871,8 @@ static void _render_main_ref(Display *d, const FullUiSnapshot *rs) {
     bool chg_input = _input_only_display_active(rs, b);
     float shown_power_w = _display_power_w(rs, b);
     float signed_current = _signed_current_a(b);
-    float volt_frac = _clampf_ui((b->voltage - 9.0f) / (BAT_FULL_V - 9.0f), 0.0f, 1.0f);
+    float volt_frac = _clampf_ui((b->voltage - rs->settings.pack_empty_v) /
+                                 (rs->settings.pack_full_v - rs->settings.pack_empty_v), 0.0f, 1.0f);
     float load_frac = _clampf_ui(b->i_dis / 60.0f, 0.0f, 1.0f);
     uint16_t volt_col = _meter_color(volt_frac, true);
     uint16_t cur_col = _meter_color(load_frac, false);
@@ -1732,8 +1894,8 @@ static void _render_main_ref(Display *d, const FullUiSnapshot *rs) {
     _format_runtime_short(b, eta_buf, sizeof(eta_buf));
     snprintf(tbat_buf, sizeof(tbat_buf), "%.0fC", b->temp_bat);
     snprintf(tsys_buf, sizeof(tsys_buf), "%.0fC", b->temp_inv);
-    snprintf(volt_top, sizeof(volt_top), "%.1f", BAT_FULL_V);
-    snprintf(volt_bottom, sizeof(volt_bottom), "9.0");
+    snprintf(volt_top, sizeof(volt_top), "%.1f", rs->settings.pack_full_v);
+    snprintf(volt_bottom, sizeof(volt_bottom), "%.1f", rs->settings.pack_empty_v);
     snprintf(amp_top, sizeof(amp_top), "60A");
     snprintf(amp_bottom, sizeof(amp_bottom), "0A");
 
@@ -1762,10 +1924,10 @@ static void _render_main_ref(Display *d, const FullUiSnapshot *rs) {
                               eta_buf, eta_col, true);
 
     _draw_compact_center_card(d, 40, 224, 50, 28, "TBAT", tbat_buf,
-                              (b->temp_bat >= TEMP_BAT_WARN_C) ? D_ORANGE : D_YELLOW, false);
+                              (b->temp_bat >= rs->settings.temp_bat_warn_c) ? D_ORANGE : D_YELLOW, false);
     _draw_compact_center_card(d, 95, 224, 50, 28, "STATE", state_buf, state_col, false);
     _draw_compact_center_card(d, 150, 224, 50, 28, "TSYS", tsys_buf,
-                              (b->temp_inv >= TEMP_INV_WARN_C) ? D_ORANGE : D_YELLOW, false);
+                              (b->temp_inv >= rs->settings.temp_inv_warn_c) ? D_ORANGE : D_YELLOW, false);
 
     _badge_safe(d, rs);
     _badge_latched(d, rs);
@@ -1798,9 +1960,12 @@ static void _render_stats_ref(Display *d, const FullUiSnapshot *rs) {
     snprintf(energy_buf, sizeof(energy_buf), "%.0fWH", b->remaining_wh);
     snprintf(delta_buf, sizeof(delta_buf), "%.0fMV", b->delta_mv);
 
-    _draw_cell_overview_card(d, 12, 42, 68, 44, "C1", b->v_b1);
-    _draw_cell_overview_card(d, 86, 42, 68, 44, "C2", b->v_b2);
-    _draw_cell_overview_card(d, 160, 42, 68, 44, "C3", b->v_b3);
+    _draw_cell_overview_card(d, 12, 42, 68, 44, "C1", b->v_b1,
+                             rs->settings.cell_warn_v, rs->settings.cell_cut_v);
+    _draw_cell_overview_card(d, 86, 42, 68, 44, "C2", b->v_b2,
+                             rs->settings.cell_warn_v, rs->settings.cell_cut_v);
+    _draw_cell_overview_card(d, 160, 42, 68, 44, "C3", b->v_b3,
+                             rs->settings.cell_warn_v, rs->settings.cell_cut_v);
 
     _draw_compact_center_card(d, 12, 92, 68, 28, "CELL 1", c1_buf, _meter_color(_clampf_ui((b->v_b1 - 3.0f) / 1.2f, 0.0f, 1.0f), true), false);
     _draw_compact_center_card(d, 86, 92, 68, 28, "CELL 2", c2_buf, _meter_color(_clampf_ui((b->v_b2 - 3.0f) / 1.2f, 0.0f, 1.0f), true), false);
@@ -1928,6 +2093,7 @@ static void _render_ports_ref(Display *d, const FullUiSnapshot *rs) {
     _draw_list_card(d, 12, 214, 216, 24, "CHARGE INPUT", chg_text, chg_col, false);
     _draw_list_card(d, 12, 244, 216, 18, "NOTE", "INPUT IS SENSOR ONLY", D_SUBTEXT, false);
     _badge_safe(d, rs);
+    _draw_footer_hint(d, "OK=TOGGLE", "HOLD=BACK");
 }
 
 static void _render_ui_cfg_ref(Display *d, const FullUiSnapshot *rs) {
@@ -1938,12 +2104,116 @@ static void _render_ui_cfg_ref(Display *d, const FullUiSnapshot *rs) {
     _draw_screen_title(d, "SETTINGS", NULL);
 
     snprintf(bright_buf, sizeof(bright_buf), "%d%%", rs->brightness);
-    _draw_list_card(d, 12, 52, 216, 40, "BRIGHTNESS", bright_buf, UI_NEON_AMB, sel == 0);
-    _draw_list_card(d, 12, 102, 216, 40, "BUZZER", rs->buzzer_en ? "ON" : "OFF",
+    _draw_list_card(d, 12, 40, 216, 22, "DISPLAY", bright_buf, UI_NEON_AMB, sel == 0);
+    _draw_list_card(d, 12, 66, 216, 22, "BUZZER", rs->buzzer_en ? "ON" : "OFF",
                     rs->buzzer_en ? D_GREEN : D_SUBTEXT, sel == 1);
-    _draw_list_card(d, 12, 152, 216, 40, "SERVICE MENU", "OPEN", UI_NEON_BLUE, sel == 2);
-    _draw_list_card(d, 12, 214, 216, 22, "ACTION", (sel < 2) ? "OK TO CHANGE" : "OK TO OPEN",
+    _draw_list_card(d, 12, 92, 216, 22, "BATTERY LIMITS", "OPEN", UI_NEON_AMB, sel == 2);
+    _draw_list_card(d, 12, 118, 216, 22, "THERMAL MODES", "OPEN", UI_NEON_GRN, sel == 3);
+    _draw_list_card(d, 12, 144, 216, 22, "CALIBRATION", "OPEN", UI_NEON_BLUE, sel == 4);
+    _draw_list_card(d, 12, 170, 216, 22, "LOG DATA", "OPEN", UI_NEON_BLUE, sel == 5);
+    _draw_list_card(d, 12, 196, 216, 22, "SERVICE", "OPEN", UI_NEON_GRN, sel == 6);
+    _draw_list_card(d, 12, 228, 216, 22, "MODE",
+                    rs->edit_active ? "EDIT VALUE" :
+                    (sel == 0 ? "OK TO EDIT" : (sel == 1 ? "OK TO TOGGLE" : "OK TO OPEN")),
+                    rs->edit_active ? D_ACCENT : D_TEXT, false);
+    _draw_menu_footer(d, rs, "OK=EDIT/OPEN", "HOLD=BACK");
+}
+
+static void _render_bat_cfg_ref(Display *d, const FullUiSnapshot *rs) {
+    int sel = rs->cur[S_BAT_CFG];
+    char cap_buf[12];
+    char warn_v_buf[12];
+    char cut_v_buf[12];
+    char warn_cell_buf[12];
+    char cut_cell_buf[12];
+
+    _draw_grid_background(d);
+    _draw_screen_title(d, "BATTERY LIMITS", NULL);
+
+    snprintf(cap_buf, sizeof(cap_buf), "%.1fAH", rs->settings.capacity_ah);
+    snprintf(warn_v_buf, sizeof(warn_v_buf), "%.1fV", rs->settings.vbat_warn_v);
+    snprintf(cut_v_buf, sizeof(cut_v_buf), "%.1fV", rs->settings.vbat_cut_v);
+    snprintf(warn_cell_buf, sizeof(warn_cell_buf), "%.2fV", rs->settings.cell_warn_v);
+    snprintf(cut_cell_buf, sizeof(cut_cell_buf), "%.2fV", rs->settings.cell_cut_v);
+
+    _draw_list_card(d, 12, 46, 216, 26, "CAPACITY", cap_buf, UI_NEON_AMB, sel == 0);
+    _draw_list_card(d, 12, 76, 216, 26, "PACK WARN", warn_v_buf, D_YELLOW, sel == 1);
+    _draw_list_card(d, 12, 106, 216, 26, "PACK CUT", cut_v_buf, D_ORANGE, sel == 2);
+    _draw_list_card(d, 12, 136, 216, 26, "CELL WARN", warn_cell_buf, D_YELLOW, sel == 3);
+    _draw_list_card(d, 12, 166, 216, 26, "CELL CUT", cut_cell_buf, D_ORANGE, sel == 4);
+    _draw_list_card(d, 12, 210, 216, 22, "TIP", "CHANGE WITH EDIT MODE", D_SUBTEXT, false);
+    _draw_menu_footer(d, rs, "OK=EDIT", "HOLD=BACK");
+}
+
+static void _render_temp_cfg_ref(Display *d, const FullUiSnapshot *rs) {
+    int sel = rs->cur[S_TEMP_CFG];
+    char buf0[12], buf1[12], buf2[12], buf3[12], buf4[12], buf5[12], buf6[12], buf7[12];
+
+    _draw_grid_background(d);
+    _draw_screen_title(d, "THERMAL MODES", NULL);
+
+    snprintf(buf0, sizeof(buf0), "%.0fC", rs->settings.temp_bat_warn_c);
+    snprintf(buf1, sizeof(buf1), "%.0fC", rs->settings.temp_bat_buzz_c);
+    snprintf(buf2, sizeof(buf2), "%.0fC", rs->settings.temp_bat_safe_c);
+    snprintf(buf3, sizeof(buf3), "%.0fC", rs->settings.temp_bat_cut_c);
+    snprintf(buf4, sizeof(buf4), "%.0fC", rs->settings.temp_bat_charge_min_c);
+    snprintf(buf5, sizeof(buf5), "%.0fC", rs->settings.temp_inv_warn_c);
+    snprintf(buf6, sizeof(buf6), "%.0fC", rs->settings.temp_inv_safe_c);
+    snprintf(buf7, sizeof(buf7), "%.0fC", rs->settings.temp_inv_cut_c);
+
+    _draw_list_card(d, 12, 38, 216, 22, "BAT WARN", buf0, D_YELLOW, sel == 0);
+    _draw_list_card(d, 12, 62, 216, 22, "BAT BUZZ", buf1, UI_NEON_AMB, sel == 1);
+    _draw_list_card(d, 12, 86, 216, 22, "BAT SAFE", buf2, D_ORANGE, sel == 2);
+    _draw_list_card(d, 12, 110, 216, 22, "BAT CUT", buf3, D_RED, sel == 3);
+    _draw_list_card(d, 12, 134, 216, 22, "CHARGE MIN", buf4, UI_NEON_BLUE, sel == 4);
+    _draw_list_card(d, 12, 158, 216, 22, "INV WARN", buf5, D_YELLOW, sel == 5);
+    _draw_list_card(d, 12, 182, 216, 22, "INV SAFE", buf6, D_ORANGE, sel == 6);
+    _draw_list_card(d, 12, 206, 216, 22, "INV CUT", buf7, D_RED, sel == 7);
+    _draw_list_card(d, 12, 232, 216, 18, "NOTE", "SENSOR LIMITS UPDATE LIVE", D_SUBTEXT, false);
+    _draw_menu_footer(d, rs, "OK=EDIT", "HOLD=BACK");
+}
+
+static void _render_cal_cfg_ref(Display *d, const FullUiSnapshot *rs) {
+    int sel = rs->cur[S_CAL_CFG];
+    char dis_buf[12];
+    char chg_buf[12];
+
+    _draw_grid_background(d);
+    _draw_screen_title(d, "CALIBRATION", NULL);
+
+    snprintf(dis_buf, sizeof(dis_buf), "%.2fMO", rs->settings.shunt_dis_mohm);
+    snprintf(chg_buf, sizeof(chg_buf), "%.2fMO", rs->settings.shunt_chg_mohm);
+
+    _draw_list_card(d, 12, 58, 216, 30, "DIS SHUNT", dis_buf, UI_NEON_BLUE, sel == 0);
+    _draw_list_card(d, 12, 96, 216, 30, "CHG SHUNT", chg_buf, UI_NEON_BLUE, sel == 1);
+    _draw_value_card(d, 12, 150, 216, 40, "CALIBRATION NOTE",
+                     "MATCH TO EXTERNAL METER", D_TEXT, false, false);
+    _draw_list_card(d, 12, 208, 216, 22, "TIP", "0.01MO PER STEP", D_SUBTEXT, false);
+    _draw_menu_footer(d, rs, "OK=EDIT", "HOLD=BACK");
+}
+
+static void _render_data_cfg_ref(Display *d, const FullUiSnapshot *rs) {
+    int sel = rs->cur[S_DATA_CFG];
+    char count_buf[12];
+    char boots_buf[12];
+
+    _draw_grid_background(d);
+    _draw_screen_title(d, "LOG DATA", NULL);
+
+    snprintf(count_buf, sizeof(count_buf), "%lu EV", (unsigned long)rs->log_total);
+    snprintf(boots_buf, sizeof(boots_buf), "%lu", (unsigned long)rs->boot_count);
+    _draw_list_card(d, 12, 40, 216, 28, "EVENT HISTORY", "OPEN", UI_NEON_BLUE, sel == 0);
+    _draw_list_card(d, 12, 72, 216, 28, "CLEAR EVENT LOG", "CLEAR", D_RED, sel == 1);
+    _draw_list_card(d, 12, 104, 216, 28, "RESET LIFETIME STATS", "RESET", D_RED, sel == 2);
+    _draw_value_card(d, 12, 150, 216, 38, "STORED EVENTS", count_buf,
+                     rs->log_total ? D_ACCENT : D_SUBTEXT, false, true);
+    _draw_value_card(d, 12, 196, 216, 38, "BOOT COUNTER", boots_buf,
+                     rs->boot_count ? D_TEXT : D_SUBTEXT, false, true);
+    _draw_list_card(d, 12, 240, 216, 18, "ACTION",
+                    sel == 0 ? "OK TO OPEN" :
+                    (sel == 1 ? "OK REQUIRES CONFIRM" : "DOUBLE CONFIRM"),
                     D_TEXT, false);
+    _draw_footer_hint(d, "OK=OPEN/CLEAR", "HOLD=BACK");
 }
 
 static void _render_advanced_ref(Display *d, const FullUiSnapshot *rs) {
@@ -1951,11 +2221,12 @@ static void _render_advanced_ref(Display *d, const FullUiSnapshot *rs) {
 
     _draw_grid_background(d);
     _draw_screen_title(d, "SERVICE", NULL);
-    _draw_list_card(d, 12, 44, 216, 34, "SYSTEM CHECK", "OPEN", UI_NEON_GRN, sel == 0);
-    _draw_list_card(d, 12, 84, 216, 34, "EVENT HISTORY", "OPEN", UI_NEON_BLUE, sel == 1);
-    _draw_list_card(d, 12, 124, 216, 34, "LIFETIME STATS", "OPEN", UI_NEON_AMB, sel == 2);
-    _draw_list_card(d, 12, 164, 216, 34, "SENSOR SCAN", "OPEN", UI_NEON_BLUE, sel == 3);
+    _draw_list_card(d, 12, 44, 216, 30, "SYSTEM CHECK", "OPEN", UI_NEON_GRN, sel == 0);
+    _draw_list_card(d, 12, 82, 216, 30, "EVENT HISTORY", "OPEN", UI_NEON_BLUE, sel == 1);
+    _draw_list_card(d, 12, 120, 216, 30, "LIFETIME STATS", "OPEN", UI_NEON_AMB, sel == 2);
+    _draw_list_card(d, 12, 158, 216, 30, "SENSOR SCAN", "OPEN", UI_NEON_BLUE, sel == 3);
     _draw_list_card(d, 12, 214, 216, 22, "ACTION", "OK TO OPEN", D_TEXT, false);
+    _draw_footer_hint(d, "OK=OPEN", "HOLD=BACK");
 }
 
 static void _render_events(Display *d, const FullUiSnapshot *rs) {
@@ -1984,7 +2255,7 @@ static void _render_events(Display *d, const FullUiSnapshot *rs) {
         _draw_scrollbar(d, 228, 42, shown * 24 - 4, (int)rs->log_total, shown, rs->ev_scroll);
     }
 
-    _draw_footer_hint(d, "OK=BACK", "ROT=SCROLL");
+    _draw_footer_hint(d, "OK=BACK", "UP/DN=SCROLL");
     _badge_safe(d, rs);
 }
 
@@ -2028,7 +2299,7 @@ static void _render_history_p0(Display *d, const FullUiSnapshot *rs) {
                     rs->total_alarm_events ? D_RED : D_SUBTEXT, false);
     _draw_list_card(d, 12, 232, 216, 20, "THIS SESSION", session_buf, D_TEXT, false);
 
-    _draw_footer_hint(d, "1/3 OVERVIEW", "ROT/CLICK");
+    _draw_footer_hint(d, "1/3 OVERVIEW", "UP/DN=PAGE");
 }
 
 static void __attribute__((unused)) _render_history_p1_legacy(Display *d, const FullUiSnapshot *rs) {
@@ -2065,7 +2336,7 @@ static void __attribute__((unused)) _render_history_p1_legacy(Display *d, const 
              (unsigned long)rs->total_temp_events);
     disp_text(d, 4, y, buf, D_RED);
 
-    disp_footer(d, "2/3 thermal", "Rot/Click=page");
+    disp_footer(d, "2/3 thermal", "UP/DN=page");
 }
 
 static void __attribute__((unused)) _render_history_p2_legacy(Display *d, const FullUiSnapshot *rs) {
@@ -2116,7 +2387,7 @@ static void __attribute__((unused)) _render_history_p2_legacy(Display *d, const 
              rs->session_peak_a, rs->session_peak_w);
     disp_text(d, 4, y, buf, D_TEXT);
 
-    disp_footer(d, "3/3 predict", "Rot/Click=page");
+    disp_footer(d, "3/3 predict", "UP/DN=page");
 }
 
 static void __attribute__((unused)) _render_history_legacy(Display *d, const FullUiSnapshot *rs) {
@@ -2142,8 +2413,8 @@ static void _render_history_p1(Display *d, const FullUiSnapshot *rs) {
     char otp_buf[16];
     uint16_t avg_col = (rs->temp_avg_c > 45.0f) ? D_RED :
                        (rs->temp_avg_c > 35.0f) ? D_ORANGE : D_GREEN;
-    uint16_t max_col = (rs->temp_max_c > TEMP_BAT_CUT_C) ? D_RED :
-                       (rs->temp_max_c > TEMP_BAT_WARN_C) ? D_ORANGE : D_TEXT;
+    uint16_t max_col = (rs->temp_max_c > rs->settings.temp_bat_cut_c) ? D_RED :
+                       (rs->temp_max_c > rs->settings.temp_bat_warn_c) ? D_ORANGE : D_TEXT;
 
     _draw_grid_background(d);
     _draw_screen_title(d, "LIFETIME STATS", "THERMAL");
@@ -2169,10 +2440,10 @@ static void _render_history_p1(Display *d, const FullUiSnapshot *rs) {
     _draw_list_card(d, 12, 204, 216, 20, "THERMAL EVENTS", otp_buf,
                     rs->total_temp_events ? D_ORANGE : D_SUBTEXT, false);
     _draw_list_card(d, 12, 228, 216, 20, "THERMAL STATE",
-                    (rs->temp_max_c > TEMP_BAT_WARN_C) ? "WATCH" : "NOMINAL",
-                    (rs->temp_max_c > TEMP_BAT_WARN_C) ? D_ORANGE : D_GREEN, false);
+                    (rs->temp_max_c > rs->settings.temp_bat_warn_c) ? "WATCH" : "NOMINAL",
+                    (rs->temp_max_c > rs->settings.temp_bat_warn_c) ? D_ORANGE : D_GREEN, false);
 
-    _draw_footer_hint(d, "2/3 THERMAL", "ROT/CLICK");
+    _draw_footer_hint(d, "2/3 THERMAL", "UP/DN=PAGE");
 }
 
 static void _render_history_p2(Display *d, const FullUiSnapshot *rs) {
@@ -2222,7 +2493,7 @@ static void _render_history_p2(Display *d, const FullUiSnapshot *rs) {
     _draw_value_card(d, 124, 156, 104, 42, "PEAK A", peak_a_buf, D_ACCENT, false, true);
     _draw_value_card(d, 12, 208, 216, 36, "PEAK W", peak_w_buf, D_ACCENT, false, true);
 
-    _draw_footer_hint(d, "3/3 FORECAST", "ROT/CLICK");
+    _draw_footer_hint(d, "3/3 FORECAST", "UP/DN=PAGE");
 }
 
 static void _render_history(Display *d, const FullUiSnapshot *rs) {
@@ -2236,7 +2507,7 @@ static void _render_history(Display *d, const FullUiSnapshot *rs) {
 }
 
 static void _render_i2c_scan(Display *d, const FullUiSnapshot *rs) {
-    disp_header(d, "I2C SCAN", "Hold OK=back");
+    disp_header(d, "I2C SCAN", "OK/HOLD=BACK");
     if (!rs->scan_valid) { disp_text_center(d, 130, "No data", D_SUBTEXT); return; }
     int y = 24; bool found = false;
     for (int ch = 0; ch < 8 && y < ST7789_H - 20; ch++) {
@@ -2329,6 +2600,10 @@ void ui_render(UI *ui) {
             case S_DIAGNOSTICS: _render_diagnostics_ref(d, &rs); break;
             case S_PORTS:    _render_ports_ref(d, &rs);       break;
             case S_UI_CFG:   _render_ui_cfg_ref(d, &rs);      break;
+            case S_BAT_CFG:  _render_bat_cfg_ref(d, &rs);     break;
+            case S_TEMP_CFG: _render_temp_cfg_ref(d, &rs);    break;
+            case S_CAL_CFG:  _render_cal_cfg_ref(d, &rs);     break;
+            case S_DATA_CFG: _render_data_cfg_ref(d, &rs);    break;
             case S_ADVANCED: _render_advanced_ref(d, &rs);    break;
             case S_EVENTS:   _render_events(d, &rs);   break;
             case S_HISTORY:  _render_history(d, &rs);  break;

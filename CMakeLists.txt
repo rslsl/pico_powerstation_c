@@ -56,6 +56,7 @@ add_executable(pico_powerstation
   src/app/protection.c
   src/app/buzzer.c
   src/app/display.c
+  src/app/system_settings.c
   src/app/ui_assets.c
   src/app/ui.c
 )

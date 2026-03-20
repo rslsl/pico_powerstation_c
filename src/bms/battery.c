@@ -9,6 +9,7 @@
 #include "bms_ocv.h"
 #include "../config.h"
 #include "../app/power_control.h"
+#include "../app/system_settings.h"
 #include "pico/stdlib.h"
 #include <stdio.h>
 #include <math.h>
@@ -77,6 +78,8 @@ void bat_init(Battery *bat,
               INA3221 *ina3221,
               LM75A *lm75a_bat, LM75A *lm75a_inv,
               PowerControl *pwr) {
+    const SystemSettings *cfg = settings_get();
+
     memset(bat, 0, sizeof(*bat));
     bat->ina_dis   = ina_dis;
     bat->ina_chg   = ina_chg;
@@ -90,14 +93,15 @@ void bat_init(Battery *bat,
     if (!bat->inv_temp_sensor_ok)
         printf("[BAT] WARN: no DC-USB temp sensor — fan relay blocked\n");
 
-    bat->voltage  = BAT_NOMINAL_V;
+    bat->voltage  = cfg->pack_nominal_v;
     bat->temp_bat = 25.0f;
     bat->temp_inv = 25.0f;
-    bat->v_b1 = bat->v_b2 = bat->v_b3 = BAT_NOMINAL_V / BAT_CELLS;
+    bat->v_b1 = bat->v_b2 = bat->v_b3 = cfg->pack_nominal_v / BAT_CELLS;
     bat->meas_valid = 0;  // all stale at init
 
-    soh_init(&bat->soh_est, BAT_CAPACITY_AH, SOH_R0_NOMINAL);
+    soh_init(&bat->soh_est, cfg->capacity_ah, SOH_R0_NOMINAL);
     soh_load(&bat->soh_est);
+    bat_apply_settings(bat, cfg->capacity_ah);
     bat->soh = bat->soh_est.soh * 100.0f;
     bat->efc = bat->soh_est.efc;
 
@@ -112,8 +116,26 @@ void bat_init(Battery *bat,
            bat->inv_temp_sensor_ok ? "OK" : "ABSENT");
 }
 
+void bat_apply_settings(Battery *bat, float capacity_ah) {
+    if (!bat) return;
+
+    bat->soh_est.q_nominal_ah = _clamp(capacity_ah, 1.0f, 120.0f);
+    if (bat->soh_est.q_measured_ah < bat->soh_est.q_nominal_ah * 0.30f ||
+        bat->soh_est.q_measured_ah > bat->soh_est.q_nominal_ah * 1.10f) {
+        bat->soh_est.q_measured_ah = bat->soh_est.q_nominal_ah;
+    }
+
+    soh_calc(&bat->soh_est);
+    bat->soh = bat->soh_est.soh * 100.0f;
+    bat->efc = bat->soh_est.efc;
+    bat->remaining_wh = (bat->soc / 100.0f) *
+                        fmaxf(bat->soh_est.q_measured_ah, 0.1f) *
+                        settings_get()->pack_nominal_v;
+}
+
 // ── Sensor read ──────────────────────────────────────────────
 void bat_read_sensors(Battery *bat) {
+    const SystemSettings *cfg = settings_get();
     bool ok_all = true;
     uint32_t now = _ms_now();
 
@@ -200,8 +222,8 @@ void bat_read_sensors(Battery *bat) {
         }
     }
 
-    bat->temp_bat_status = _temp_status(bat->temp_bat, TEMP_BAT_WARN_C, TEMP_BAT_SAFE_C);
-    bat->temp_inv_status = _temp_status(bat->temp_inv, TEMP_INV_WARN_C, TEMP_INV_SAFE_C);
+    bat->temp_bat_status = _temp_status(bat->temp_bat, cfg->temp_bat_warn_c, cfg->temp_bat_safe_c);
+    bat->temp_inv_status = _temp_status(bat->temp_inv, cfg->temp_inv_warn_c, cfg->temp_inv_safe_c);
     {
         bool charge_enter = (bat->i_chg > 0.30f) && (bat->i_net < -0.15f);
         bool charge_hold  = (bat->i_chg > 0.20f) && (bat->i_net < -0.05f);
@@ -223,6 +245,7 @@ void bat_read_sensors(Battery *bat) {
 
 // ── BMS logic ────────────────────────────────────────────────
 void bat_update_bms(Battery *bat, float dt_s) {
+    const SystemSettings *cfg = settings_get();
     bool pack_ok = bat_meas_fresh(bat, MEAS_VALID_PACK);
     bool chg_ok  = bat_meas_fresh(bat, MEAS_VALID_CHG);
     bool tbat_ok = bat_meas_fresh(bat, MEAS_VALID_TBAT);
@@ -281,7 +304,7 @@ void bat_update_bms(Battery *bat, float dt_s) {
     bat->soh = bat->soh_est.soh * 100.0f;
     bat->efc = bat->soh_est.efc;
     float usable_ah = fmaxf(bat->soh_est.q_measured_ah, 0.1f);
-    bat->remaining_wh = soc_frac * usable_ah * BAT_NOMINAL_V;
+    bat->remaining_wh = soc_frac * usable_ah * cfg->pack_nominal_v;
 
     if (bat->is_charging && chg_ok) {
         float net_charge_a = fmaxf(-bat->i_net, 0.0f);

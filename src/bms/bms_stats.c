@@ -28,6 +28,24 @@ static inline float _clampf(float v, float lo, float hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+static void _stats_reset_payload(BmsStats *s, uint32_t boot_count, float soh_seed) {
+    memset(&s->flash, 0, sizeof(s->flash));
+    s->flash.version = STATS_VERSION;
+    s->flash.boot_count = boot_count;
+    s->flash.temp_min_c = 200.0f;
+    s->flash.temp_max_c = -100.0f;
+    s->flash.soh_initial = soh_seed;
+    s->flash.soh_last = soh_seed;
+    s->flash.peukert_calibrated = STATS_DEFAULT_PEUKERT;
+
+    s->session_wh_out = 0.0f;
+    s->session_wh_in = 0.0f;
+    s->session_peak_a = 0.0f;
+    s->session_peak_w = 0.0f;
+    s->initialized = true;
+    s->dirty = true;
+}
+
 void stats_init(BmsStats *s) {
     memset(s, 0, sizeof(*s));
 
@@ -54,13 +72,7 @@ void stats_init(BmsStats *s) {
         printf("[STATS] migrated v2->v3: boots=%lu EFC=%.1f out=%.0fWh\n",
                (unsigned long)f.boot_count, f.efc_total, f.energy_out_wh);
     } else {
-        memset(&s->flash, 0, sizeof(s->flash));
-        s->flash.version   = STATS_VERSION;
-        s->flash.temp_min_c = 200.0f;
-        s->flash.temp_max_c = -100.0f;
-        s->flash.soh_initial = 100.0f;
-        s->flash.soh_last    = 100.0f;
-        s->flash.peukert_calibrated = STATS_DEFAULT_PEUKERT;
+        _stats_reset_payload(s, 0u, 100.0f);
         s->_nvm_seq  = 0;
         s->_nvm_slot = 0;
         printf("[STATS] fresh record\n");
@@ -156,6 +168,18 @@ void stats_save(BmsStats *s) {
     else printf("[STATS] saved: boots=%lu EFC=%.1f SOH=%.1f%%\n",
                 (unsigned long)f->boot_count, f->efc_total, f->soh_last);
     s->dirty = false;
+}
+
+void stats_reset(BmsStats *s) {
+    float soh_seed;
+
+    if (!s) return;
+
+    soh_seed = (s->flash.soh_last > 0.0f && s->flash.soh_last <= 100.0f)
+        ? s->flash.soh_last : 100.0f;
+    _stats_reset_payload(s, 1u, soh_seed);
+    stats_save(s);
+    printf("[STATS] lifetime stats reset\n");
 }
 
 float stats_efficiency_pct(const BmsStats *s) {

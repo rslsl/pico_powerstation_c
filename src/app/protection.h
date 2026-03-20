@@ -47,24 +47,24 @@
 
 // ── Hysteresis clear thresholds (alarm clears above these values) ────────
 // Prevents flapping at the boundary.
-#define SOC_WARN_CLR_PCT    (SOC_WARN_PCT   + 3.0f)
-#define SOC_CUT_CLR_PCT     (SOC_CUTOFF_PCT + 2.0f)
-#define VBAT_WARN_CLR_V     (VBAT_WARN_V   + 0.3f)
-#define VBAT_CUT_CLR_V      (VBAT_CUT_V    + 0.2f)
-#define CELL_WARN_CLR_V     (CELL_WARN_V   + 0.05f)
-#define CELL_CUT_CLR_V      (CELL_CUT_V    + 0.03f)
-#define DELTA_WARN_CLR_MV   (DELTA_WARN_MV - 15.0f)
-#define DELTA_CUT_CLR_MV    (DELTA_CUT_MV  - 20.0f)
-#define IDIS_WARN_CLR_A     (IDIS_WARN_A   - 3.0f)
-#define IDIS_CUT_CLR_A      (IDIS_CUT_A    - 5.0f)
-#define TEMP_BAT_WARN_CLR_C (TEMP_BAT_WARN_C - 3.0f)
-#define TEMP_BAT_BUZZ_CLR_C (TEMP_BAT_BUZZ_C - 3.0f)
-#define TEMP_BAT_SAFE_CLR_C (TEMP_BAT_SAFE_C - 5.0f)
-#define TEMP_BAT_CUT_CLR_C  (TEMP_BAT_CUT_C  - 5.0f)
-#define TEMP_BAT_CHARGE_CLR_C (TEMP_BAT_CHARGE_MIN_C + 3.0f)
-#define TEMP_INV_WARN_CLR_C (TEMP_INV_WARN_C - 3.0f)
-#define TEMP_INV_SAFE_CLR_C (TEMP_INV_SAFE_C - 5.0f)
-#define TEMP_INV_CUT_CLR_C  (TEMP_INV_CUT_C  - 5.0f)
+#define SOC_WARN_CLR_PCT_DELTA      3.0f
+#define SOC_CUT_CLR_PCT_DELTA       2.0f
+#define VBAT_WARN_CLR_MARGIN_V      0.3f
+#define VBAT_CUT_CLR_MARGIN_V       0.2f
+#define CELL_WARN_CLR_MARGIN_V      0.05f
+#define CELL_CUT_CLR_MARGIN_V       0.03f
+#define DELTA_WARN_CLR_MARGIN_MV   15.0f
+#define DELTA_CUT_CLR_MARGIN_MV    20.0f
+#define IDIS_WARN_CLR_MARGIN_A      3.0f
+#define IDIS_CUT_CLR_MARGIN_A       5.0f
+#define TEMP_BAT_WARN_CLR_MARGIN_C  3.0f
+#define TEMP_BAT_BUZZ_CLR_MARGIN_C  3.0f
+#define TEMP_BAT_SAFE_CLR_MARGIN_C  5.0f
+#define TEMP_BAT_CUT_CLR_MARGIN_C   5.0f
+#define TEMP_BAT_CHARGE_CLR_MARGIN_C 3.0f
+#define TEMP_INV_WARN_CLR_MARGIN_C  3.0f
+#define TEMP_INV_SAFE_CLR_MARGIN_C  5.0f
+#define TEMP_INV_CUT_CLR_MARGIN_C   5.0f
 #define CELL_OVP_CLR_V      (BAT_CELL_OVP_V - 0.05f)
 
 // ── Number of alarm bits tracked for debounce ─────────────────

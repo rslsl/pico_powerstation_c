@@ -72,6 +72,7 @@ typedef struct {
 
 void  stats_init(BmsStats *s);
 void  stats_save(BmsStats *s);
+void  stats_reset(BmsStats *s);
 
 // P1.5/P1.6: now takes separate dis_wh_total and chg_wh_total (not mixed)
 void  stats_update(BmsStats *s,

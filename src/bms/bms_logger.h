@@ -59,6 +59,7 @@ void     log_write(BmsLogger *l, const LogEvent *ev);
 bool     log_read(const BmsLogger *l, uint32_t idx, LogEvent *ev_out);
 uint32_t log_count(const BmsLogger *l);
 void     log_flush_header(BmsLogger *l);
+void     log_reset(BmsLogger *l);
 
 // Brown-out API: викликати з protection.c при V < VBAT_BROWNOUT
 void     log_set_brownout(bool state);

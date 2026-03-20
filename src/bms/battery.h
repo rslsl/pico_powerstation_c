@@ -87,6 +87,7 @@ void bat_read_sensors(Battery *bat);
 void bat_update_bms  (Battery *bat, float dt_s);
 void bat_save        (Battery *bat);
 void bat_emergency_off(Battery *bat);   // P0.1: now real implementation
+void bat_apply_settings(Battery *bat, float capacity_ah);
 
 // FMEA-02: true only if measurement group bit is valid and not stale
 bool bat_meas_fresh(const Battery *bat, uint8_t group_bit);

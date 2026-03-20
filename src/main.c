@@ -45,6 +45,7 @@
 #include "app/protection.h"
 #include "app/buzzer.h"
 #include "app/display.h"
+#include "app/system_settings.h"
 #include "app/ui.h"
 
 // в”Ђв”Ђ Globals в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
@@ -75,6 +76,8 @@ static volatile bool g_core1_ready = false;
 
 static absolute_time_t t_sensor, t_logic, t_save, t_loop;
 static absolute_time_t t_ui;
+
+static void _apply_runtime_settings(bool reconfigure_sensors);
 
 typedef struct {
     bool pack_valid;
@@ -424,27 +427,28 @@ static void _init_i2c(void) {
 }
 
 static bool _init_sensors(bool *inv_ok_out) {
+    const SystemSettings *cfg = settings_get();
     tca_init(&g_tca, I2C_PORT, TCA_ADDR);
     _log_i2c_scan();
     bool ok = true;
     if (!ina226_init(&g_ina_dis, I2C_PORT, &g_tca,
-                     TCA_CH_DIS, INA226_DIS_ADDR, SHUNT_DIS_MOHM, IMAX_DIS_A))
+                     TCA_CH_DIS, INA226_DIS_ADDR, cfg->shunt_dis_mohm, IMAX_DIS_A))
         { printf("[INIT] INA226 DIS fail\n"); ok = false; }
     if (!ina226_init(&g_ina_chg, I2C_PORT, &g_tca,
-                     TCA_CH_CHG, INA226_CHG_ADDR, SHUNT_CHG_MOHM, IMAX_CHG_A))
+                     TCA_CH_CHG, INA226_CHG_ADDR, cfg->shunt_chg_mohm, IMAX_CHG_A))
         { printf("[INIT] INA226 CHG fail\n"); ok = false; }
     if (!ina3221_init(&g_ina3221, I2C_PORT, &g_tca,
                       TCA_CH_INA3221, INA3221_ADDR))
         { printf("[INIT] INA3221 fail\n"); ok = false; }
     if (!lm75a_init(&g_lm75a_bat, I2C_PORT, &g_tca,
                     TCA_CH_LM75A_BAT, LM75A_BAT_ADDR,
-                    TEMP_BAT_CUT_C, TEMP_BAT_WARN_C))
+                    cfg->temp_bat_cut_c, cfg->temp_bat_warn_c))
         { printf("[INIT] LM75A bat fail\n"); ok = false; }
 
     // FMEA-15: DC-USB temp вЂ” optional, absence blocks PORT_FAN
     *inv_ok_out = lm75a_init(&g_lm75a_inv, I2C_PORT, &g_tca,
                               TCA_CH_LM75A_INV, LM75A_INV_ADDR,
-                              TEMP_INV_CUT_C, TEMP_INV_WARN_C);
+                              cfg->temp_inv_cut_c, cfg->temp_inv_warn_c);
     if (!*inv_ok_out)
         printf("[INIT] LM75A dc-usb absent вЂ” fan relay will be blocked\n");
 
@@ -454,6 +458,8 @@ static bool _init_sensors(bool *inv_ok_out) {
 static void _init_all(void) {
     sleep_ms(PWR_LATCH_SETTLE_MS);
     printf("\n=== PowerStation BMS %s ===\n", FW_VERSION);
+
+    settings_init();
 
     g_bat_lock_num = spin_lock_claim_unused(true);
     g_bat_lock     = spin_lock_instance(g_bat_lock_num);
@@ -477,13 +483,49 @@ static void _init_all(void) {
     prot_init(&g_prot, &g_pwr);
     log_init(&g_logger);
     stats_init(&g_stats);
-    pred_init(&g_pred, BAT_CAPACITY_AH, BAT_NOMINAL_V);
+    pred_init(&g_pred, settings_get()->capacity_ah, settings_get()->pack_nominal_v);
     pred_seed(&g_pred,
               stats_predictor_baseline_power_w(&g_stats),
               stats_predictor_peukert(&g_stats));
 
     ui_init(&g_ui, &g_disp, &g_pwr, &g_pseq,
-            &g_buz, &g_bat_snapshot, &g_prot, &g_stats, &g_logger);
+            &g_buz, &g_bat_snapshot, &g_prot, &g_stats, &g_logger,
+            _apply_runtime_settings);
+}
+
+static void _apply_runtime_settings(bool reconfigure_sensors) {
+    const SystemSettings *cfg = settings_get();
+
+    if (reconfigure_sensors) {
+        if (!ina226_init(&g_ina_dis, I2C_PORT, &g_tca,
+                         TCA_CH_DIS, INA226_DIS_ADDR,
+                         cfg->shunt_dis_mohm, IMAX_DIS_A)) {
+            printf("[SET] reconfig INA226 DIS failed\n");
+        }
+        if (!ina226_init(&g_ina_chg, I2C_PORT, &g_tca,
+                         TCA_CH_CHG, INA226_CHG_ADDR,
+                         cfg->shunt_chg_mohm, IMAX_CHG_A)) {
+            printf("[SET] reconfig INA226 CHG failed\n");
+        }
+        if (!lm75a_init(&g_lm75a_bat, I2C_PORT, &g_tca,
+                        TCA_CH_LM75A_BAT, LM75A_BAT_ADDR,
+                        cfg->temp_bat_cut_c, cfg->temp_bat_warn_c)) {
+            printf("[SET] reconfig LM75A BAT failed\n");
+        }
+        if (g_bat.inv_temp_sensor_ok &&
+            !lm75a_init(&g_lm75a_inv, I2C_PORT, &g_tca,
+                        TCA_CH_LM75A_INV, LM75A_INV_ADDR,
+                        cfg->temp_inv_cut_c, cfg->temp_inv_warn_c)) {
+            printf("[SET] reconfig LM75A INV failed\n");
+        }
+    }
+
+    bat_apply_settings(&g_bat, cfg->capacity_ah);
+    pred_init(&g_pred, cfg->capacity_ah, cfg->pack_nominal_v);
+    pred_seed(&g_pred,
+              stats_predictor_baseline_power_w(&g_stats),
+              stats_predictor_peukert(&g_stats));
+    _snapshot_update();
 }
 
 // в”Ђв”Ђ main() в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
@@ -638,7 +680,7 @@ int main(void) {
                 discharge_start_ah = g_bat.soh_est.dis_ah_total;
                 discharge_start_soc = snap.soc / 100.0f;
                 discharge_start_ms = ms_now;
-                pred_init(&g_pred, BAT_CAPACITY_AH, BAT_NOMINAL_V);
+                pred_init(&g_pred, settings_get()->capacity_ah, settings_get()->pack_nominal_v);
                 pred_seed(&g_pred,
                           stats_predictor_baseline_power_w(&g_stats),
                           stats_predictor_peukert(&g_stats));
@@ -659,7 +701,7 @@ int main(void) {
                                                session_ah,
                                                dod_frac,
                                                g_bat.soh_est.q_measured_ah,
-                                               BAT_NOMINAL_V);
+                                               settings_get()->pack_nominal_v);
                 g_bat.pred_confidence = 0.0f;
             }
             prev_discharge_active = discharge_active;

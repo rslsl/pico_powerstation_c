@@ -9,6 +9,7 @@
 // ============================================================
 #include "protection.h"
 #include "config.h"
+#include "system_settings.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -69,6 +70,7 @@ static void _debounce(Protection *prot, int bit,
 
 // ── Main protection check ─────────────────────────────────────
 void prot_check(Protection *prot, const Battery *bat) {
+    const SystemSettings *cfg = settings_get();
     prot->alarms_prev = prot->alarms;
 
     // ── Debounced alarm evaluation ────────────────────────────
@@ -85,23 +87,23 @@ void prot_check(Protection *prot, const Battery *bat) {
     // SOC WARN
     _debounce(prot, 0,
               pack_ok && (bat->soc <= SOC_WARN_PCT),
-              pack_ok && (bat->soc >= SOC_WARN_CLR_PCT),
+              pack_ok && (bat->soc >= (SOC_WARN_PCT + SOC_WARN_CLR_PCT_DELTA)),
               PROT_DEBOUNCE_WARN, PROT_CLEAR_DEBOUNCE);
     // SOC CUT (also latched)
     _debounce(prot, 1,
               pack_ok && (bat->soc <= SOC_CUTOFF_PCT),
-              pack_ok && (bat->soc >= SOC_CUT_CLR_PCT),
+              pack_ok && (bat->soc >= (SOC_CUTOFF_PCT + SOC_CUT_CLR_PCT_DELTA)),
               PROT_DEBOUNCE_CUT, PROT_CLEAR_DEBOUNCE);
 
     // VBAT WARN
     _debounce(prot, 2,
-              pack_ok && (bat->voltage <= VBAT_WARN_V),
-              pack_ok && (bat->voltage >= VBAT_WARN_CLR_V),
+              pack_ok && (bat->voltage <= cfg->vbat_warn_v),
+              pack_ok && (bat->voltage >= (cfg->vbat_warn_v + VBAT_WARN_CLR_MARGIN_V)),
               PROT_DEBOUNCE_WARN, PROT_CLEAR_DEBOUNCE);
     // VBAT CUT
     _debounce(prot, 3,
-              pack_ok && (bat->voltage <= VBAT_CUT_V),
-              pack_ok && (bat->voltage >= VBAT_CUT_CLR_V),
+              pack_ok && (bat->voltage <= cfg->vbat_cut_v),
+              pack_ok && (bat->voltage >= (cfg->vbat_cut_v + VBAT_CUT_CLR_MARGIN_V)),
               PROT_DEBOUNCE_CUT, PROT_CLEAR_DEBOUNCE);
 
     // Cell WARN
@@ -112,72 +114,72 @@ void prot_check(Protection *prot, const Battery *bat) {
     if (bat->v_b2 > v_max) v_max = bat->v_b2;
     if (bat->v_b3 > v_max) v_max = bat->v_b3;
     _debounce(prot, 4,
-              cells_ok && (v_min <= CELL_WARN_V),
-              cells_ok && (v_min >= CELL_WARN_CLR_V),
+              cells_ok && (v_min <= cfg->cell_warn_v),
+              cells_ok && (v_min >= (cfg->cell_warn_v + CELL_WARN_CLR_MARGIN_V)),
               PROT_DEBOUNCE_WARN, PROT_CLEAR_DEBOUNCE);
     // Cell CUT
     _debounce(prot, 5,
-              cells_ok && (v_min <= CELL_CUT_V),
-              cells_ok && (v_min >= CELL_CUT_CLR_V),
+              cells_ok && (v_min <= cfg->cell_cut_v),
+              cells_ok && (v_min >= (cfg->cell_cut_v + CELL_CUT_CLR_MARGIN_V)),
               PROT_DEBOUNCE_CUT, PROT_CLEAR_DEBOUNCE);
 
     // Delta WARN
     _debounce(prot, 6,
               cells_ok && (bat->delta_mv >= DELTA_WARN_MV),
-              cells_ok && (bat->delta_mv <= DELTA_WARN_CLR_MV),
+              cells_ok && (bat->delta_mv <= (DELTA_WARN_MV - DELTA_WARN_CLR_MARGIN_MV)),
               PROT_DEBOUNCE_WARN, PROT_CLEAR_DEBOUNCE);
     // Delta CUT
     _debounce(prot, 7,
               cells_ok && (bat->delta_mv >= DELTA_CUT_MV),
-              cells_ok && (bat->delta_mv <= DELTA_CUT_CLR_MV),
+              cells_ok && (bat->delta_mv <= (DELTA_CUT_MV - DELTA_CUT_CLR_MARGIN_MV)),
               PROT_DEBOUNCE_CUT, PROT_CLEAR_DEBOUNCE);
 
     // OCP WARN
     _debounce(prot, 8,
               pack_ok && (bat->i_dis >= IDIS_WARN_A),
-              pack_ok && (bat->i_dis <= IDIS_WARN_CLR_A),
+              pack_ok && (bat->i_dis <= (IDIS_WARN_A - IDIS_WARN_CLR_MARGIN_A)),
               PROT_DEBOUNCE_WARN, PROT_CLEAR_DEBOUNCE);
     // OCP CUT — fast (OCP is instantaneous event, 1 sample enough for cut)
     _debounce(prot, 9,
               pack_ok && (bat->i_dis >= IDIS_CUT_A),
-              pack_ok && (bat->i_dis <= IDIS_CUT_CLR_A),
+              pack_ok && (bat->i_dis <= (IDIS_CUT_A - IDIS_CUT_CLR_MARGIN_A)),
               1, PROT_CLEAR_DEBOUNCE);
 
     // TEMP BAT WARN
     _debounce(prot, 10,
-              tbat_ok && (bat->temp_bat >= TEMP_BAT_WARN_C),
-              tbat_ok && (bat->temp_bat <= TEMP_BAT_WARN_CLR_C),
+              tbat_ok && (bat->temp_bat >= cfg->temp_bat_warn_c),
+              tbat_ok && (bat->temp_bat <= (cfg->temp_bat_warn_c - TEMP_BAT_WARN_CLR_MARGIN_C)),
               PROT_DEBOUNCE_WARN, PROT_CLEAR_DEBOUNCE);
     // TEMP BAT BUZZ
     _debounce(prot, 17,
-              tbat_ok && (bat->temp_bat >= TEMP_BAT_BUZZ_C),
-              tbat_ok && (bat->temp_bat <= TEMP_BAT_BUZZ_CLR_C),
+              tbat_ok && (bat->temp_bat >= cfg->temp_bat_buzz_c),
+              tbat_ok && (bat->temp_bat <= (cfg->temp_bat_buzz_c - TEMP_BAT_BUZZ_CLR_MARGIN_C)),
               PROT_DEBOUNCE_WARN, PROT_CLEAR_DEBOUNCE);
     // TEMP BAT SAFE
     _debounce(prot, 18,
-              tbat_ok && (bat->temp_bat >= TEMP_BAT_SAFE_C),
-              tbat_ok && (bat->temp_bat <= TEMP_BAT_SAFE_CLR_C),
+              tbat_ok && (bat->temp_bat >= cfg->temp_bat_safe_c),
+              tbat_ok && (bat->temp_bat <= (cfg->temp_bat_safe_c - TEMP_BAT_SAFE_CLR_MARGIN_C)),
               PROT_DEBOUNCE_CUT, PROT_CLEAR_DEBOUNCE);
     // TEMP BAT CUT — latched emergency
     _debounce(prot, 11,
-              tbat_ok && (bat->temp_bat >= TEMP_BAT_CUT_C),
-              tbat_ok && (bat->temp_bat <= TEMP_BAT_CUT_CLR_C),
+              tbat_ok && (bat->temp_bat >= cfg->temp_bat_cut_c),
+              tbat_ok && (bat->temp_bat <= (cfg->temp_bat_cut_c - TEMP_BAT_CUT_CLR_MARGIN_C)),
               PROT_DEBOUNCE_CUT, PROT_CLEAR_DEBOUNCE);
 
     // TEMP INV WARN
     _debounce(prot, 12,
-              tinv_ok && (bat->temp_inv >= TEMP_INV_WARN_C),
-              tinv_ok && (bat->temp_inv <= TEMP_INV_WARN_CLR_C),
+              tinv_ok && (bat->temp_inv >= cfg->temp_inv_warn_c),
+              tinv_ok && (bat->temp_inv <= (cfg->temp_inv_warn_c - TEMP_INV_WARN_CLR_MARGIN_C)),
               PROT_DEBOUNCE_WARN, PROT_CLEAR_DEBOUNCE);
     // TEMP INV SAFE
     _debounce(prot, 19,
-              tinv_ok && (bat->temp_inv >= TEMP_INV_SAFE_C),
-              tinv_ok && (bat->temp_inv <= TEMP_INV_SAFE_CLR_C),
+              tinv_ok && (bat->temp_inv >= cfg->temp_inv_safe_c),
+              tinv_ok && (bat->temp_inv <= (cfg->temp_inv_safe_c - TEMP_INV_SAFE_CLR_MARGIN_C)),
               PROT_DEBOUNCE_CUT, PROT_CLEAR_DEBOUNCE);
     // TEMP INV CUT
     _debounce(prot, 13,
-              tinv_ok && (bat->temp_inv >= TEMP_INV_CUT_C),
-              tinv_ok && (bat->temp_inv <= TEMP_INV_CUT_CLR_C),
+              tinv_ok && (bat->temp_inv >= cfg->temp_inv_cut_c),
+              tinv_ok && (bat->temp_inv <= (cfg->temp_inv_cut_c - TEMP_INV_CUT_CLR_MARGIN_C)),
               PROT_DEBOUNCE_CUT, PROT_CLEAR_DEBOUNCE);
 
     // Cell OVP -> charge protection
@@ -188,8 +190,8 @@ void prot_check(Protection *prot, const Battery *bat) {
 
     // Cold-charge protection -> inhibit charging below 0C
     _debounce(prot, 16,
-              tbat_ok && (bat->temp_bat <= TEMP_BAT_CHARGE_MIN_C),
-              tbat_ok && (bat->temp_bat >= TEMP_BAT_CHARGE_CLR_C),
+              tbat_ok && (bat->temp_bat <= cfg->temp_bat_charge_min_c),
+              tbat_ok && (bat->temp_bat >= (cfg->temp_bat_charge_min_c + TEMP_BAT_CHARGE_CLR_MARGIN_C)),
               PROT_DEBOUNCE_WARN, PROT_CLEAR_DEBOUNCE);
 
     bool i2c_stale = (!cells_ok || !pack_ok || !tbat_ok);
