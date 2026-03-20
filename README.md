@@ -13,19 +13,6 @@
 - UI для дисплея ST7789 240x280
 - допоміжні build-цілі для перевірки дисплея та нового pinout
 
-## UI Preview
-
-Нижче використані найсвіжіші UI-зображення, які зараз є в цьому репозиторії.
-
-<p align="center">
-  <img src="ui_assets/screens/png_240x280/screen_home.png" width="220" alt="Home screen">
-  <img src="ui_assets/screens/png_240x280/screen_battery.png" width="220" alt="Battery screen">
-</p>
-
-<p align="center">
-  <img src="ui_assets/screens/png_240x280/screen_outputs.png" width="220" alt="Outputs screen">
-  <img src="ui_assets/screens/png_240x280/screen_settings.png" width="220" alt="Settings screen">
-</p>
 
 ## Ключові особливості
 
@@ -114,19 +101,6 @@ The project includes:
 - a 240x280 ST7789-based UI
 - auxiliary build targets for display and pinout smoke tests
 
-## UI Preview
-
-The screenshots below use the latest UI images currently available in this repository.
-
-<p align="center">
-  <img src="ui_assets/screens/png_240x280/screen_home.png" width="220" alt="Home screen">
-  <img src="ui_assets/screens/png_240x280/screen_battery.png" width="220" alt="Battery screen">
-</p>
-
-<p align="center">
-  <img src="ui_assets/screens/png_240x280/screen_outputs.png" width="220" alt="Outputs screen">
-  <img src="ui_assets/screens/png_240x280/screen_settings.png" width="220" alt="Settings screen">
-</p>
 
 ## Highlights
 
