@@ -6,15 +6,15 @@
 
 ### Home / System
 
-![Home screen](docs/images/ui-home.jpg)
+![Home screen](docs/images/PXL_20260320_155251543.jpg)
 
 ### Battery Info
 
-![Battery info screen](docs/images/ui-battery.jpg)
+![Battery info screen](docs/images/PXL_20260320_155235338.jpg)
 
 ### Charging
 
-![Charging screen](docs/images/ui-charging.jpg)
+![Charging screen](docs/images/PXL_20260320_173904632.jpg)
 
 ## Українська
 
