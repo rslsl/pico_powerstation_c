@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define SETTINGS_MAGIC   0x53595453u
-#define SETTINGS_VERSION 1u
+#define SETTINGS_VERSION 2u
 
 typedef struct __attribute__((packed)) {
     uint16_t version;
@@ -30,6 +30,19 @@ typedef struct __attribute__((packed)) {
 
     float shunt_dis_mohm;
     float shunt_chg_mohm;
+    float pack_dis_v_gain;
+    float pack_chg_v_gain;
+    float cell1_v_gain;
+    float cell2_v_gain;
+    float cell3_v_gain;
+
+    float cal_ref_dis_current_a;
+    float cal_ref_dis_voltage_v;
+    float cal_ref_chg_current_a;
+    float cal_ref_chg_voltage_v;
+    float cal_ref_cell1_v;
+    float cal_ref_cell2_v;
+    float cal_ref_cell3_v;
 
     uint8_t ui_brightness;
     uint8_t buzzer_en;

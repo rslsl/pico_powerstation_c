@@ -32,7 +32,7 @@ typedef struct {
     PowerControl *pwr;
 
     // Measured (every SENSOR_MS)
-    float    voltage, i_dis, i_chg, i_net, power_w;
+    float    voltage, v_chg_bus, i_dis, i_chg, i_net, power_w;
     float    temp_bat, temp_inv;
     float    v_b1, v_b2, v_b3, delta_mv;
 
@@ -95,7 +95,7 @@ bool bat_meas_fresh(const Battery *bat, uint8_t group_bit);
 // ── Thread-safe snapshot ──────────────────────────────────────
 // Copied by Core0 under spinlock. Core1 reads ONLY from this.
 typedef struct {
-    float    voltage, i_dis, i_chg, i_net, power_w;
+    float    voltage, v_chg_bus, i_dis, i_chg, i_net, power_w;
     float    temp_bat, temp_inv;
     float    v_b1, v_b2, v_b3, delta_mv;
     float    soc, soc_std, remaining_wh, r0_mohm, soh, efc;

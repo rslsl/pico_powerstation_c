@@ -19,6 +19,7 @@
 #include "config.h"
 #include "hardware/gpio.h"
 #include "hardware/sync.h"
+#include "hardware/watchdog.h"
 #include "pico/stdlib.h"
 #include "../drivers/tca9548a.h"
 #include "../bms/bms_logger.h"
@@ -31,11 +32,12 @@
 // ── Parent state table ────────────────────────────────────────
 static const UiState _PARENT[S_COUNT] = {
     S_MAIN, S_MAIN, S_MAIN, S_ADVANCED, S_MAIN,
-    S_PORTS, S_UI_CFG, S_UI_CFG, S_UI_CFG, S_UI_CFG,
-    S_UI_CFG, S_ADVANCED, S_ADVANCED, S_ADVANCED,
+    S_PORTS, S_UI_CFG, S_UI_CFG, S_UI_CFG, S_CAL_CFG,
+    S_CAL_ITEM, S_UI_CFG, S_UI_CFG, S_ADVANCED, S_ADVANCED,
+    S_ADVANCED,
 };
-static const bool _IS_INFO[S_COUNT] = {1,1,1,0,0,0,0,0,0,0,0,0,0,0};
-static const bool _IS_MENU[S_COUNT] = {0,0,0,0,1,1,1,1,1,1,1,0,0,0};
+static const bool _IS_INFO[S_COUNT] = {1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static const bool _IS_MENU[S_COUNT] = {0,0,0,0,1,1,1,1,1,1,0,1,1,0,0,0};
 static const PortId _PORT_MENU_IDS[] = {
     PORT_DC_OUT, PORT_USB_PD, PORT_FAN
 };
@@ -43,8 +45,44 @@ static const PortId _PORT_MENU_IDS[] = {
 #define POWEROFF_AUDIO_CUE1_MS  250u
 #define POWEROFF_AUDIO_CUE2_MS 1050u
 #define POWEROFF_AUDIO_CUE3_MS 1850u
+#define CAL_GAIN_MIN 0.80f
+#define CAL_GAIN_MAX 1.20f
+
+typedef enum {
+    CAL_SENSOR_DISCHARGE = 0,
+    CAL_SENSOR_CHARGE = 1,
+    CAL_SENSOR_CELLS = 2,
+    CAL_SENSOR_COUNT
+} CalSensor;
+
+typedef enum {
+    CAL_TARGET_DIS_CURRENT = 0,
+    CAL_TARGET_DIS_VOLTAGE = 1,
+    CAL_TARGET_CHG_CURRENT = 2,
+    CAL_TARGET_CHG_VOLTAGE = 3,
+    CAL_TARGET_CELL1_VOLTAGE = 4,
+    CAL_TARGET_CELL2_VOLTAGE = 5,
+    CAL_TARGET_CELL3_VOLTAGE = 6,
+    CAL_TARGET_COUNT
+} CalTarget;
 
 static void _rs_publish(UI *ui);
+
+static bool _finitef_ui(float v) {
+    return !isnan(v) && !isinf(v);
+}
+
+static float _clampf_local(float v, float lo, float hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+static CalSensor _clampf_cal_sensor(uint8_t sensor) {
+    return (sensor < CAL_SENSOR_COUNT) ? (CalSensor)sensor : CAL_SENSOR_DISCHARGE;
+}
+
+static CalTarget _clampf_cal_target(uint8_t target) {
+    return (target < CAL_TARGET_COUNT) ? (CalTarget)target : CAL_TARGET_DIS_CURRENT;
+}
 
 static bool _can_hold_poweroff(UiState s) {
     return s == S_MAIN || s == S_STATS || s == S_BATTERY || s == S_DIAGNOSTICS;
@@ -102,13 +140,178 @@ static const char *_port_menu_label(int idx) {
     }
 }
 
-static int _menu_len(UiState s) {
+static const char *_cal_sensor_label(CalSensor sensor) {
+    switch (sensor) {
+        case CAL_SENSOR_DISCHARGE: return "DISCHARGE";
+        case CAL_SENSOR_CHARGE:    return "CHARGE";
+        case CAL_SENSOR_CELLS:     return "CELLS";
+        default:                   return "DISCHARGE";
+    }
+}
+
+static int _cal_menu_count(CalSensor sensor) {
+    return (sensor == CAL_SENSOR_CELLS) ? 3 : 2;
+}
+
+static CalTarget _cal_target_for_menu(CalSensor sensor, int idx) {
+    switch (sensor) {
+        case CAL_SENSOR_DISCHARGE:
+            return (idx <= 0) ? CAL_TARGET_DIS_CURRENT : CAL_TARGET_DIS_VOLTAGE;
+        case CAL_SENSOR_CHARGE:
+            return (idx <= 0) ? CAL_TARGET_CHG_CURRENT : CAL_TARGET_CHG_VOLTAGE;
+        case CAL_SENSOR_CELLS:
+            if (idx <= 0) return CAL_TARGET_CELL1_VOLTAGE;
+            if (idx == 1) return CAL_TARGET_CELL2_VOLTAGE;
+            return CAL_TARGET_CELL3_VOLTAGE;
+        default:
+            return CAL_TARGET_DIS_CURRENT;
+    }
+}
+
+static const char *_cal_target_label(CalTarget target) {
+    switch (target) {
+        case CAL_TARGET_DIS_CURRENT:  return "CURRENT";
+        case CAL_TARGET_DIS_VOLTAGE:  return "VOLTAGE";
+        case CAL_TARGET_CHG_CURRENT:  return "CURRENT";
+        case CAL_TARGET_CHG_VOLTAGE:  return "VOLTAGE";
+        case CAL_TARGET_CELL1_VOLTAGE:return "C1 VOLTAGE";
+        case CAL_TARGET_CELL2_VOLTAGE:return "C2 VOLTAGE";
+        case CAL_TARGET_CELL3_VOLTAGE:return "C3 VOLTAGE";
+        default:                      return "CURRENT";
+    }
+}
+
+static const char *_cal_result_label(CalTarget target) {
+    switch (target) {
+        case CAL_TARGET_DIS_CURRENT:
+        case CAL_TARGET_CHG_CURRENT:
+            return "SHUNT";
+        default:
+            return "GAIN";
+    }
+}
+
+static bool _cal_is_current(CalTarget target) {
+    return target == CAL_TARGET_DIS_CURRENT || target == CAL_TARGET_CHG_CURRENT;
+}
+
+static float _cal_step(CalTarget target) {
+    return _cal_is_current(target) ? 0.10f : 0.01f;
+}
+
+static float _cal_min(CalTarget target) {
+    if (target == CAL_TARGET_DIS_CURRENT) return 0.10f;
+    if (target == CAL_TARGET_CHG_CURRENT) return 0.05f;
+    if (target == CAL_TARGET_CELL1_VOLTAGE ||
+        target == CAL_TARGET_CELL2_VOLTAGE ||
+        target == CAL_TARGET_CELL3_VOLTAGE) return 2.50f;
+    return 5.00f;
+}
+
+static float _cal_max(CalTarget target) {
+    if (target == CAL_TARGET_DIS_CURRENT) return IMAX_DIS_A * 1.5f;
+    if (target == CAL_TARGET_CHG_CURRENT) return IMAX_CHG_A * 1.5f;
+    if (target == CAL_TARGET_CELL1_VOLTAGE ||
+        target == CAL_TARGET_CELL2_VOLTAGE ||
+        target == CAL_TARGET_CELL3_VOLTAGE) return 5.00f;
+    return 20.00f;
+}
+
+static float _cal_live_value(const BatSnapshot *bat, CalTarget target) {
+    if (!bat) return 0.0f;
+    switch (target) {
+        case CAL_TARGET_DIS_CURRENT:   return bat->i_dis;
+        case CAL_TARGET_DIS_VOLTAGE:   return bat->voltage;
+        case CAL_TARGET_CHG_CURRENT:   return bat->i_chg;
+        case CAL_TARGET_CHG_VOLTAGE:   return bat->v_chg_bus;
+        case CAL_TARGET_CELL1_VOLTAGE: return bat->v_b1;
+        case CAL_TARGET_CELL2_VOLTAGE: return bat->v_b2;
+        case CAL_TARGET_CELL3_VOLTAGE: return bat->v_b3;
+        default:                       return 0.0f;
+    }
+}
+
+static bool _cal_target_has_live_value(const BatSnapshot *bat, CalTarget target) {
+    if (!bat) return false;
+    if (target == CAL_TARGET_DIS_CURRENT || target == CAL_TARGET_DIS_VOLTAGE) {
+        return (bat->meas_valid & MEAS_VALID_PACK) != 0;
+    }
+    if (target == CAL_TARGET_CHG_CURRENT || target == CAL_TARGET_CHG_VOLTAGE) {
+        return (bat->meas_valid & MEAS_VALID_CHG) != 0;
+    }
+    return (bat->meas_valid & MEAS_VALID_CELLS) != 0;
+}
+
+static float _cal_saved_ref(const SystemSettings *cfg, CalTarget target) {
+    switch (target) {
+        case CAL_TARGET_DIS_CURRENT:   return cfg->cal_ref_dis_current_a;
+        case CAL_TARGET_DIS_VOLTAGE:   return cfg->cal_ref_dis_voltage_v;
+        case CAL_TARGET_CHG_CURRENT:   return cfg->cal_ref_chg_current_a;
+        case CAL_TARGET_CHG_VOLTAGE:   return cfg->cal_ref_chg_voltage_v;
+        case CAL_TARGET_CELL1_VOLTAGE: return cfg->cal_ref_cell1_v;
+        case CAL_TARGET_CELL2_VOLTAGE: return cfg->cal_ref_cell2_v;
+        case CAL_TARGET_CELL3_VOLTAGE: return cfg->cal_ref_cell3_v;
+        default:                       return 0.0f;
+    }
+}
+
+static float _cal_current_result(const SystemSettings *cfg, CalTarget target) {
+    switch (target) {
+        case CAL_TARGET_DIS_CURRENT:   return cfg->shunt_dis_mohm;
+        case CAL_TARGET_CHG_CURRENT:   return cfg->shunt_chg_mohm;
+        case CAL_TARGET_DIS_VOLTAGE:   return cfg->pack_dis_v_gain;
+        case CAL_TARGET_CHG_VOLTAGE:   return cfg->pack_chg_v_gain;
+        case CAL_TARGET_CELL1_VOLTAGE: return cfg->cell1_v_gain;
+        case CAL_TARGET_CELL2_VOLTAGE: return cfg->cell2_v_gain;
+        case CAL_TARGET_CELL3_VOLTAGE: return cfg->cell3_v_gain;
+        default:                       return 0.0f;
+    }
+}
+
+static float _cal_preview_result(const SystemSettings *cfg, const BatSnapshot *bat,
+                                 CalTarget target, float ref_value) {
+    float live_value = _cal_live_value(bat, target);
+    float current_result = _cal_current_result(cfg, target);
+
+    if (!_finitef_ui(live_value) || !_finitef_ui(ref_value) ||
+        live_value <= 0.0f || ref_value <= 0.0f) {
+        return current_result;
+    }
+
+    if (_cal_is_current(target)) {
+        float next = current_result * live_value / ref_value;
+        return _clampf_local(next, 0.10f, 5.0f);
+    }
+
+    {
+        float next = current_result * ref_value / live_value;
+        return _clampf_local(next, CAL_GAIN_MIN, CAL_GAIN_MAX);
+    }
+}
+
+static void _cal_prepare(UI *ui, CalTarget target) {
+    const SystemSettings *cfg = settings_get();
+    float live_value = _cal_live_value(ui->snap, target);
+    float saved_ref = _cal_saved_ref(cfg, target);
+
+    ui->cal_target = (uint8_t)target;
+    if (_cal_target_has_live_value(ui->snap, target) && _finitef_ui(live_value) && live_value > 0.0f) {
+        ui->cal_ref_value = live_value;
+    } else if (_finitef_ui(saved_ref) && saved_ref > 0.0f) {
+        ui->cal_ref_value = saved_ref;
+    } else {
+        ui->cal_ref_value = _cal_min(target);
+    }
+}
+
+static int _menu_len(const UI *ui, UiState s) {
     switch (s) {
         case S_PORTS:    return PORT_MENU_COUNT + 1;
         case S_UI_CFG:   return 7;
         case S_BAT_CFG:  return 5;
         case S_TEMP_CFG: return 8;
-        case S_CAL_CFG:  return 2;
+        case S_CAL_CFG:  return CAL_SENSOR_COUNT;
+        case S_CAL_ITEM: return _cal_menu_count(_clampf_cal_sensor(ui->cal_sensor));
         case S_DATA_CFG: return 3;
         case S_ADVANCED: return 4;
         default:         return 1;
@@ -176,11 +379,14 @@ static bool _adjust_setting(UI *ui, int dir) {
             else return false;
             return _settings_apply(ui, &cfg, true, NULL);
 
-        case S_CAL_CFG:
-            if (sel == 0) cfg.shunt_dis_mohm += (dir > 0 ? 0.01f : -0.01f);
-            else if (sel == 1) cfg.shunt_chg_mohm += (dir > 0 ? 0.01f : -0.01f);
-            else return false;
-            return _settings_apply(ui, &cfg, true, NULL);
+        case S_CAL_EDIT: {
+            CalTarget target = _clampf_cal_target(ui->cal_target);
+            float next = ui->cal_ref_value + ((dir > 0) ? _cal_step(target) : -_cal_step(target));
+            next = _clampf_local(next, _cal_min(target), _cal_max(target));
+            ui->cal_ref_value = next;
+            _rs_publish(ui);
+            return true;
+        }
 
         default:
             return false;
@@ -231,6 +437,66 @@ static void _confirm_apply(UI *ui) {
         if (ui->stats) {
             stats_reset(ui->stats);
             ui_toast(ui, "Lifetime stats reset");
+        }
+    } else if ((UiConfirmAction)ui->confirm_kind == UI_CONFIRM_APPLY_CALIB) {
+        SystemSettings cfg;
+        CalTarget target = _clampf_cal_target(ui->cal_target);
+        float live_value = _cal_live_value(ui->snap, target);
+        float ref_value = ui->cal_ref_value;
+
+        if (!_cal_target_has_live_value(ui->snap, target) ||
+            !_finitef_ui(live_value) || !_finitef_ui(ref_value) ||
+            live_value <= 0.0f || ref_value <= 0.0f) {
+            ui_toast(ui, "Calibration source unavailable");
+        } else {
+            settings_copy(&cfg);
+
+            switch (target) {
+                case CAL_TARGET_DIS_CURRENT:
+                    cfg.shunt_dis_mohm = _cal_preview_result(&cfg, ui->snap, target, ref_value);
+                    cfg.cal_ref_dis_current_a = ref_value;
+                    break;
+                case CAL_TARGET_DIS_VOLTAGE:
+                    cfg.pack_dis_v_gain = _cal_preview_result(&cfg, ui->snap, target, ref_value);
+                    cfg.cal_ref_dis_voltage_v = ref_value;
+                    break;
+                case CAL_TARGET_CHG_CURRENT:
+                    cfg.shunt_chg_mohm = _cal_preview_result(&cfg, ui->snap, target, ref_value);
+                    cfg.cal_ref_chg_current_a = ref_value;
+                    break;
+                case CAL_TARGET_CHG_VOLTAGE:
+                    cfg.pack_chg_v_gain = _cal_preview_result(&cfg, ui->snap, target, ref_value);
+                    cfg.cal_ref_chg_voltage_v = ref_value;
+                    break;
+                case CAL_TARGET_CELL1_VOLTAGE:
+                    cfg.cell1_v_gain = _cal_preview_result(&cfg, ui->snap, target, ref_value);
+                    cfg.cal_ref_cell1_v = ref_value;
+                    break;
+                case CAL_TARGET_CELL2_VOLTAGE:
+                    cfg.cell2_v_gain = _cal_preview_result(&cfg, ui->snap, target, ref_value);
+                    cfg.cal_ref_cell2_v = ref_value;
+                    break;
+                case CAL_TARGET_CELL3_VOLTAGE:
+                    cfg.cell3_v_gain = _cal_preview_result(&cfg, ui->snap, target, ref_value);
+                    cfg.cal_ref_cell3_v = ref_value;
+                    break;
+                default:
+                    break;
+            }
+
+            if (!settings_store(&cfg)) {
+                ui_toast(ui, "Calibration save failed");
+            } else {
+                ui->confirm_active = false;
+                ui->confirm_kind = UI_CONFIRM_NONE;
+                ui->confirm_arg = -1;
+                ui->edit_active = false;
+                _rs_publish(ui);
+                ui_toast(ui, "Calibration saved. Rebooting");
+                sleep_ms(120);
+                watchdog_reboot(0u, 0u, 10u);
+                while (1) tight_loop_contents();
+            }
         }
     }
 
@@ -328,6 +594,9 @@ static void _rs_publish(UI *ui) {
     rs->confirm_arg = ui->confirm_arg;
     settings_copy(&rs->settings);
     rs->edit_active = ui->edit_active;
+    rs->cal_sensor = ui->cal_sensor;
+    rs->cal_target = ui->cal_target;
+    rs->cal_ref_value = ui->cal_ref_value;
     if (ui->ok_btn_held && _can_hold_poweroff(ui->state)) {
         uint32_t now = to_ms_since_boot(get_absolute_time());
         uint32_t held = now - ui->ok_btn_press_ms;
@@ -469,6 +738,10 @@ static void _click(UI *ui) {
         return;
     }
     if (ui->edit_active) {
+        if (ui->state == S_CAL_EDIT) {
+            _confirm_open(ui, UI_CONFIRM_APPLY_CALIB, 0);
+            return;
+        }
         ui->edit_active = false;
         _rs_publish(ui);
         return;
@@ -501,7 +774,26 @@ static void _click(UI *ui) {
         }
         case S_BAT_CFG:
         case S_TEMP_CFG:
+            ui->edit_active = true;
+            _rs_publish(ui);
+            break;
         case S_CAL_CFG:
+            ui->cal_sensor = (uint8_t)_clampf_cal_sensor((uint8_t)ui->cur[S_CAL_CFG]);
+            ui->cur[S_CAL_ITEM] = 0;
+            _go(ui, S_CAL_ITEM);
+            break;
+        case S_CAL_ITEM: {
+            CalSensor sensor = _clampf_cal_sensor(ui->cal_sensor);
+            CalTarget target = _cal_target_for_menu(sensor, ui->cur[S_CAL_ITEM]);
+            if (!_cal_target_has_live_value(ui->snap, target)) {
+                ui_toast(ui, "Sensor data unavailable");
+            } else {
+                _cal_prepare(ui, target);
+                _go(ui, S_CAL_EDIT);
+            }
+            break;
+        }
+        case S_CAL_EDIT:
             ui->edit_active = true;
             _rs_publish(ui);
             break;
@@ -598,7 +890,7 @@ void ui_poll(UI *ui) {
             if (s > S_BATTERY)     s = S_MAIN;
             _go(ui, (UiState)s);
         } else if (_IS_MENU[ui->state]) {
-            int mx = _menu_len(ui->state);
+            int mx = _menu_len(ui, ui->state);
             int c = (int)ui->cur[ui->state] + (nav_step > 0 ? 1 : -1);
             if (c < 0)  c = mx - 1;
             if (c >= mx) c = 0;
@@ -1259,7 +1551,11 @@ static void _draw_footer_hint(Display *d, const char *left, const char *right) {
 static void _draw_menu_footer(Display *d, const FullUiSnapshot *rs,
                               const char *normal_left, const char *normal_right) {
     if (rs->edit_active) {
-        _draw_footer_hint(d, "UP/DN=ADJUST", "OK/HOLD=EXIT");
+        if (rs->state == S_CAL_EDIT) {
+            _draw_footer_hint(d, "UP/DN=REF", "OK=APPLY");
+        } else {
+            _draw_footer_hint(d, "UP/DN=ADJUST", "OK/HOLD=EXIT");
+        }
     } else {
         _draw_footer_hint(d, normal_left, normal_right);
     }
@@ -1282,11 +1578,19 @@ static void _draw_confirm_overlay(Display *d, const FullUiSnapshot *rs) {
         lines[0] = "RESET LIFETIME STATS?";
     } else if ((UiConfirmAction)rs->confirm_kind == UI_CONFIRM_RESET_STATS_FINAL) {
         lines[0] = "ERASE STATS PERMANENTLY?";
+    } else if ((UiConfirmAction)rs->confirm_kind == UI_CONFIRM_APPLY_CALIB) {
+        snprintf(prompt, sizeof(prompt), "APPLY %s?", _cal_target_label(_clampf_cal_target(rs->cal_target)));
+        lines[0] = prompt;
     } else {
         lines[0] = "CONFIRM ACTION?";
     }
-    lines[1] = "OK = CONFIRM";
-    lines[2] = "UP/DOWN = CANCEL";
+    if ((UiConfirmAction)rs->confirm_kind == UI_CONFIRM_APPLY_CALIB) {
+        lines[1] = "OK=SAVE+REBOOT";
+        lines[2] = "UP/DN=CANCEL";
+    } else {
+        lines[1] = "OK = CONFIRM";
+        lines[2] = "UP/DOWN = CANCEL";
+    }
     disp_dialog(d, lines, 3);
 }
 
@@ -2175,20 +2479,106 @@ static void _render_temp_cfg_ref(Display *d, const FullUiSnapshot *rs) {
 
 static void _render_cal_cfg_ref(Display *d, const FullUiSnapshot *rs) {
     int sel = rs->cur[S_CAL_CFG];
-    char dis_buf[12];
-    char chg_buf[12];
 
     _draw_grid_background(d);
     _draw_screen_title(d, "CALIBRATION", NULL);
 
-    snprintf(dis_buf, sizeof(dis_buf), "%.2fMO", rs->settings.shunt_dis_mohm);
-    snprintf(chg_buf, sizeof(chg_buf), "%.2fMO", rs->settings.shunt_chg_mohm);
+    _draw_list_card(d, 12, 54, 216, 30, "DISCHARGE", "OPEN", UI_NEON_BLUE, sel == 0);
+    _draw_list_card(d, 12, 92, 216, 30, "CHARGE", "OPEN", UI_NEON_AMB, sel == 1);
+    _draw_list_card(d, 12, 130, 216, 30, "CELLS", "OPEN", UI_NEON_GRN, sel == 2);
+    _draw_value_card(d, 12, 178, 216, 38, "FLOW",
+                     "SENSOR -> VALUE -> REF", D_TEXT, false, false);
+    _draw_list_card(d, 12, 230, 216, 18, "NOTE", "CONFIRM WILL SAVE + REBOOT", D_SUBTEXT, false);
+    _draw_footer_hint(d, "OK=SELECT", "HOLD=BACK");
+}
 
-    _draw_list_card(d, 12, 58, 216, 30, "DIS SHUNT", dis_buf, UI_NEON_BLUE, sel == 0);
-    _draw_list_card(d, 12, 96, 216, 30, "CHG SHUNT", chg_buf, UI_NEON_BLUE, sel == 1);
-    _draw_value_card(d, 12, 150, 216, 40, "CALIBRATION NOTE",
-                     "MATCH TO EXTERNAL METER", D_TEXT, false, false);
-    _draw_list_card(d, 12, 208, 216, 22, "TIP", "0.01MO PER STEP", D_SUBTEXT, false);
+static void _render_cal_item_ref(Display *d, const FullUiSnapshot *rs) {
+    CalSensor sensor = _clampf_cal_sensor(rs->cal_sensor);
+    int sel = rs->cur[S_CAL_ITEM];
+    int count = _cal_menu_count(sensor);
+
+    _draw_grid_background(d);
+    _draw_screen_title(d, "CAL TARGET", _cal_sensor_label(sensor));
+
+    for (int i = 0; i < count; ++i) {
+        CalTarget target = _cal_target_for_menu(sensor, i);
+        char value_buf[20];
+        float live_value = _cal_live_value(&rs->bat, target);
+        bool live_ok = _cal_target_has_live_value(&rs->bat, target) &&
+                       _finitef_ui(live_value) && live_value > 0.0f;
+
+        if (live_ok) {
+            if (_cal_is_current(target)) snprintf(value_buf, sizeof(value_buf), "%.2fA", live_value);
+            else                         snprintf(value_buf, sizeof(value_buf), "%.3fV", live_value);
+        } else {
+            snprintf(value_buf, sizeof(value_buf), "NO DATA");
+        }
+
+        _draw_list_card(d, 12, 48 + i * 36, 216, 28,
+                        _cal_target_label(target),
+                        value_buf,
+                        live_ok ? D_GREEN : D_ORANGE,
+                        sel == i);
+    }
+
+    _draw_value_card(d, 12, 184, 216, 38, "INPUT",
+                     "ENTER EXTERNAL REFERENCE", D_TEXT, false, false);
+    _draw_list_card(d, 12, 232, 216, 18, "ACTION", "OK TO OPEN", D_SUBTEXT, false);
+    _draw_footer_hint(d, "OK=OPEN", "HOLD=BACK");
+}
+
+static void _render_cal_edit_ref(Display *d, const FullUiSnapshot *rs) {
+    CalSensor sensor = _clampf_cal_sensor(rs->cal_sensor);
+    CalTarget target = _clampf_cal_target(rs->cal_target);
+    float live_value = _cal_live_value(&rs->bat, target);
+    float saved_ref = _cal_saved_ref(&rs->settings, target);
+    float current_result = _cal_current_result(&rs->settings, target);
+    float preview_result = _cal_preview_result(&rs->settings, &rs->bat, target, rs->cal_ref_value);
+    bool live_ok = _cal_target_has_live_value(&rs->bat, target) &&
+                   _finitef_ui(live_value) && live_value > 0.0f;
+    char live_buf[20];
+    char ref_buf[20];
+    char saved_buf[20];
+    char active_buf[20];
+    char preview_buf[20];
+
+    _draw_grid_background(d);
+    _draw_screen_title(d, "CALIBRATION", _cal_sensor_label(sensor));
+
+    if (live_ok) {
+        if (_cal_is_current(target)) snprintf(live_buf, sizeof(live_buf), "%.2fA", live_value);
+        else                         snprintf(live_buf, sizeof(live_buf), "%.3fV", live_value);
+    } else {
+        snprintf(live_buf, sizeof(live_buf), "NO DATA");
+    }
+
+    if (_cal_is_current(target)) snprintf(ref_buf, sizeof(ref_buf), "%.2fA", rs->cal_ref_value);
+    else                         snprintf(ref_buf, sizeof(ref_buf), "%.3fV", rs->cal_ref_value);
+
+    if (saved_ref > 0.0f) {
+        if (_cal_is_current(target)) snprintf(saved_buf, sizeof(saved_buf), "%.2fA", saved_ref);
+        else                         snprintf(saved_buf, sizeof(saved_buf), "%.3fV", saved_ref);
+    } else {
+        snprintf(saved_buf, sizeof(saved_buf), "--");
+    }
+
+    if (_cal_is_current(target)) {
+        snprintf(active_buf, sizeof(active_buf), "%.3fMO", current_result);
+        snprintf(preview_buf, sizeof(preview_buf), "%.3fMO", preview_result);
+    } else {
+        snprintf(active_buf, sizeof(active_buf), "%.4fX", current_result);
+        snprintf(preview_buf, sizeof(preview_buf), "%.4fX", preview_result);
+    }
+
+    _draw_list_card(d, 12, 40, 216, 22, "TARGET", _cal_target_label(target), UI_NEON_BLUE, false);
+    _draw_list_card(d, 12, 68, 216, 22, "MEASURED", live_buf, live_ok ? D_GREEN : D_ORANGE, false);
+    _draw_list_card(d, 12, 96, 216, 22, "REFERENCE", ref_buf, D_ACCENT, rs->edit_active);
+    _draw_list_card(d, 12, 124, 216, 22, "LAST REF", saved_buf, D_TEXT, false);
+    _draw_list_card(d, 12, 152, 216, 22, _cal_result_label(target), active_buf, UI_NEON_AMB, false);
+    _draw_list_card(d, 12, 180, 216, 22, "NEW VALUE", preview_buf, UI_NEON_GRN, false);
+    _draw_list_card(d, 12, 214, 216, 18, "NOTE",
+                    rs->edit_active ? "OK TO SAVE + REBOOT" : "OK TO EDIT REFERENCE",
+                    D_SUBTEXT, false);
     _draw_menu_footer(d, rs, "OK=EDIT", "HOLD=BACK");
 }
 
@@ -2603,6 +2993,8 @@ void ui_render(UI *ui) {
             case S_BAT_CFG:  _render_bat_cfg_ref(d, &rs);     break;
             case S_TEMP_CFG: _render_temp_cfg_ref(d, &rs);    break;
             case S_CAL_CFG:  _render_cal_cfg_ref(d, &rs);     break;
+            case S_CAL_ITEM: _render_cal_item_ref(d, &rs);    break;
+            case S_CAL_EDIT: _render_cal_edit_ref(d, &rs);    break;
             case S_DATA_CFG: _render_data_cfg_ref(d, &rs);    break;
             case S_ADVANCED: _render_advanced_ref(d, &rs);    break;
             case S_EVENTS:   _render_events(d, &rs);   break;

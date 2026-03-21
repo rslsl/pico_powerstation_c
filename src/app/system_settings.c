@@ -11,12 +11,67 @@ static uint32_t g_settings_seq = 0;
 static uint8_t g_settings_slot = 0;
 static bool g_settings_ready = false;
 
+typedef struct __attribute__((packed)) {
+    uint16_t version;
+
+    float capacity_ah;
+    float pack_full_v;
+    float pack_empty_v;
+    float pack_nominal_v;
+
+    float cell_warn_v;
+    float cell_cut_v;
+    float vbat_warn_v;
+    float vbat_cut_v;
+
+    float temp_bat_warn_c;
+    float temp_bat_buzz_c;
+    float temp_bat_safe_c;
+    float temp_bat_cut_c;
+    float temp_bat_charge_min_c;
+    float temp_inv_warn_c;
+    float temp_inv_safe_c;
+    float temp_inv_cut_c;
+
+    float shunt_dis_mohm;
+    float shunt_chg_mohm;
+
+    uint8_t ui_brightness;
+    uint8_t buzzer_en;
+    uint8_t _pad[2];
+} SystemSettingsV1;
+
 static float _clampf(float v, float lo, float hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
 static bool _finitef(float v) {
     return !isnan(v) && !isinf(v);
+}
+
+static void _settings_from_v1(SystemSettings *dst, const SystemSettingsV1 *src) {
+    settings_defaults(dst);
+
+    dst->capacity_ah            = src->capacity_ah;
+    dst->pack_full_v            = src->pack_full_v;
+    dst->pack_empty_v           = src->pack_empty_v;
+    dst->pack_nominal_v         = src->pack_nominal_v;
+    dst->cell_warn_v            = src->cell_warn_v;
+    dst->cell_cut_v             = src->cell_cut_v;
+    dst->vbat_warn_v            = src->vbat_warn_v;
+    dst->vbat_cut_v             = src->vbat_cut_v;
+    dst->temp_bat_warn_c        = src->temp_bat_warn_c;
+    dst->temp_bat_buzz_c        = src->temp_bat_buzz_c;
+    dst->temp_bat_safe_c        = src->temp_bat_safe_c;
+    dst->temp_bat_cut_c         = src->temp_bat_cut_c;
+    dst->temp_bat_charge_min_c  = src->temp_bat_charge_min_c;
+    dst->temp_inv_warn_c        = src->temp_inv_warn_c;
+    dst->temp_inv_safe_c        = src->temp_inv_safe_c;
+    dst->temp_inv_cut_c         = src->temp_inv_cut_c;
+    dst->shunt_dis_mohm         = src->shunt_dis_mohm;
+    dst->shunt_chg_mohm         = src->shunt_chg_mohm;
+    dst->ui_brightness          = src->ui_brightness;
+    dst->buzzer_en              = src->buzzer_en;
 }
 
 void settings_defaults(SystemSettings *out) {
@@ -44,6 +99,19 @@ void settings_defaults(SystemSettings *out) {
 
     out->shunt_dis_mohm = SHUNT_DIS_MOHM;
     out->shunt_chg_mohm = SHUNT_CHG_MOHM;
+    out->pack_dis_v_gain = 1.0f;
+    out->pack_chg_v_gain = 1.0f;
+    out->cell1_v_gain = 1.0f;
+    out->cell2_v_gain = 1.0f;
+    out->cell3_v_gain = 1.0f;
+
+    out->cal_ref_dis_current_a = 0.0f;
+    out->cal_ref_dis_voltage_v = 0.0f;
+    out->cal_ref_chg_current_a = 0.0f;
+    out->cal_ref_chg_voltage_v = 0.0f;
+    out->cal_ref_cell1_v = 0.0f;
+    out->cal_ref_cell2_v = 0.0f;
+    out->cal_ref_cell3_v = 0.0f;
 
     out->ui_brightness = UI_BL_ACTIVE_PCT;
     out->buzzer_en = 1u;
@@ -126,26 +194,70 @@ static void _settings_sanitize(SystemSettings *s) {
     s->shunt_dis_mohm = _clampf(s->shunt_dis_mohm, 0.10f, 5.0f);
     s->shunt_chg_mohm = _clampf(s->shunt_chg_mohm, 0.10f, 5.0f);
 
+    if (!_finitef(s->pack_dis_v_gain)) s->pack_dis_v_gain = def.pack_dis_v_gain;
+    if (!_finitef(s->pack_chg_v_gain)) s->pack_chg_v_gain = def.pack_chg_v_gain;
+    if (!_finitef(s->cell1_v_gain)) s->cell1_v_gain = def.cell1_v_gain;
+    if (!_finitef(s->cell2_v_gain)) s->cell2_v_gain = def.cell2_v_gain;
+    if (!_finitef(s->cell3_v_gain)) s->cell3_v_gain = def.cell3_v_gain;
+    s->pack_dis_v_gain = _clampf(s->pack_dis_v_gain, 0.80f, 1.20f);
+    s->pack_chg_v_gain = _clampf(s->pack_chg_v_gain, 0.80f, 1.20f);
+    s->cell1_v_gain = _clampf(s->cell1_v_gain, 0.80f, 1.20f);
+    s->cell2_v_gain = _clampf(s->cell2_v_gain, 0.80f, 1.20f);
+    s->cell3_v_gain = _clampf(s->cell3_v_gain, 0.80f, 1.20f);
+
+    if (!_finitef(s->cal_ref_dis_current_a)) s->cal_ref_dis_current_a = def.cal_ref_dis_current_a;
+    if (!_finitef(s->cal_ref_dis_voltage_v)) s->cal_ref_dis_voltage_v = def.cal_ref_dis_voltage_v;
+    if (!_finitef(s->cal_ref_chg_current_a)) s->cal_ref_chg_current_a = def.cal_ref_chg_current_a;
+    if (!_finitef(s->cal_ref_chg_voltage_v)) s->cal_ref_chg_voltage_v = def.cal_ref_chg_voltage_v;
+    if (!_finitef(s->cal_ref_cell1_v)) s->cal_ref_cell1_v = def.cal_ref_cell1_v;
+    if (!_finitef(s->cal_ref_cell2_v)) s->cal_ref_cell2_v = def.cal_ref_cell2_v;
+    if (!_finitef(s->cal_ref_cell3_v)) s->cal_ref_cell3_v = def.cal_ref_cell3_v;
+    s->cal_ref_dis_current_a = _clampf(s->cal_ref_dis_current_a, 0.0f, IMAX_DIS_A * 1.5f);
+    s->cal_ref_dis_voltage_v = _clampf(s->cal_ref_dis_voltage_v, 0.0f, 20.0f);
+    s->cal_ref_chg_current_a = _clampf(s->cal_ref_chg_current_a, 0.0f, IMAX_CHG_A * 1.5f);
+    s->cal_ref_chg_voltage_v = _clampf(s->cal_ref_chg_voltage_v, 0.0f, 20.0f);
+    s->cal_ref_cell1_v = _clampf(s->cal_ref_cell1_v, 0.0f, 5.0f);
+    s->cal_ref_cell2_v = _clampf(s->cal_ref_cell2_v, 0.0f, 5.0f);
+    s->cal_ref_cell3_v = _clampf(s->cal_ref_cell3_v, 0.0f, 5.0f);
+
     s->ui_brightness = (uint8_t)_clampf((float)s->ui_brightness, 10.0f, 100.0f);
     s->buzzer_en = s->buzzer_en ? 1u : 0u;
 }
 
 void settings_init(void) {
     SystemSettings loaded;
+    SystemSettingsV1 legacy;
     uint32_t seq = 0;
     uint8_t slot = 0;
+    bool loaded_ok = false;
+    bool migrated_v1 = false;
 
     if (nvm_ab_load(FLASH_SETTINGS_OFFSET, FLASH_SETTINGS_OFFSET_B,
                     SETTINGS_MAGIC,
                     &loaded, sizeof(loaded),
                     &seq, &slot) &&
         loaded.version == SETTINGS_VERSION) {
+        loaded_ok = true;
+    } else if (nvm_ab_load(FLASH_SETTINGS_OFFSET, FLASH_SETTINGS_OFFSET_B,
+                           SETTINGS_MAGIC,
+                           &legacy, sizeof(legacy),
+                           &seq, &slot) &&
+               legacy.version == 1u) {
+        _settings_from_v1(&loaded, &legacy);
+        loaded_ok = true;
+        migrated_v1 = true;
+    }
+
+    if (loaded_ok) {
         _settings_sanitize(&loaded);
         g_settings = loaded;
         g_settings_seq = seq;
         g_settings_slot = slot;
-        printf("[SET] loaded: cap=%.1fAh chg_shunt=%.3fmOhm\n",
-               g_settings.capacity_ah, g_settings.shunt_chg_mohm);
+        printf("[SET] %s: cap=%.1fAh chg_shunt=%.3fmOhm dis_gain=%.4f\n",
+               migrated_v1 ? "migrated v1" : "loaded",
+               g_settings.capacity_ah,
+               g_settings.shunt_chg_mohm,
+               g_settings.pack_dis_v_gain);
     } else {
         settings_defaults(&g_settings);
         g_settings_seq = 0;

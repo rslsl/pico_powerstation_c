@@ -26,11 +26,13 @@ typedef enum {
     S_BAT_CFG = 6,
     S_TEMP_CFG = 7,
     S_CAL_CFG = 8,
-    S_DATA_CFG = 9,
-    S_ADVANCED = 10,
-    S_EVENTS = 11,
-    S_HISTORY = 12,
-    S_I2C_SCAN = 13,
+    S_CAL_ITEM = 9,
+    S_CAL_EDIT = 10,
+    S_DATA_CFG = 11,
+    S_ADVANCED = 12,
+    S_EVENTS = 13,
+    S_HISTORY = 14,
+    S_I2C_SCAN = 15,
     S_COUNT
 } UiState;
 
@@ -41,6 +43,7 @@ typedef enum {
     UI_CONFIRM_CLEAR_LOG = 3,
     UI_CONFIRM_RESET_STATS = 4,
     UI_CONFIRM_RESET_STATS_FINAL = 5,
+    UI_CONFIRM_APPLY_CALIB = 6,
 } UiConfirmAction;
 
 typedef void (*UiSettingsApplyFn)(bool reconfigure_sensors);
@@ -94,6 +97,9 @@ typedef struct {
     int8_t confirm_arg;
     SystemSettings settings;
     bool edit_active;
+    uint8_t cal_sensor;
+    uint8_t cal_target;
+    float cal_ref_value;
 
     UiState state;
     int8_t cur[S_COUNT];
@@ -145,6 +151,9 @@ typedef struct {
     uint8_t confirm_kind;
     int8_t confirm_arg;
     bool edit_active;
+    uint8_t cal_sensor;
+    uint8_t cal_target;
+    float cal_ref_value;
 
     float soc_anim;
     bool blink;

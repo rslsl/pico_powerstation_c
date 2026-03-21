@@ -94,6 +94,7 @@ void bat_init(Battery *bat,
         printf("[BAT] WARN: no DC-USB temp sensor — fan relay blocked\n");
 
     bat->voltage  = cfg->pack_nominal_v;
+    bat->v_chg_bus = cfg->pack_nominal_v;
     bat->temp_bat = 25.0f;
     bat->temp_inv = 25.0f;
     bat->v_b1 = bat->v_b2 = bat->v_b3 = cfg->pack_nominal_v / BAT_CELLS;
@@ -142,6 +143,7 @@ void bat_read_sensors(Battery *bat) {
     // ── INA226 discharge (pack voltage + i_dis) ───────────────
     float v, i_d, p;
     if (ina226_read(bat->ina_dis, &v, &i_d, &p) && _sensor_vi_sane(v, i_d)) {
+        v *= cfg->pack_dis_v_gain;
         bat->voltage = v;
         bat->i_dis   = _clamp(i_d, 0.0f, IMAX_DIS_A * 1.2f);
         _mark_valid(bat, 0);
@@ -155,10 +157,13 @@ void bat_read_sensors(Battery *bat) {
     // ── INA226 charge (i_chg) ────────────────────────────────
     float _v, i_c, _p;
     if (ina226_read(bat->ina_chg, &_v, &i_c, &_p) && _sensor_vi_sane(_v, i_c)) {
+        _v *= cfg->pack_chg_v_gain;
+        bat->v_chg_bus = _v;
         bat->i_chg = _clamp(fabsf(i_c), 0.0f, IMAX_CHG_A * 1.2f);
         _mark_valid(bat, 1);
     } else {
         printf("[BAT] ina_chg fail/sanity\n");
+        bat->v_chg_bus = 0.0f;
         bat->i_chg = 0.0f;
         _mark_stale(bat, 1);
         // Charge monitor is optional for normal discharge-only operation.
@@ -171,10 +176,25 @@ void bat_read_sensors(Battery *bat) {
 
     // ── INA3221 cells ─────────────────────────────────────────
     // FMEA-02: if cells stale > 600ms -> raise charge advisory + disable fan
-    if (!ina3221_read_cells(bat->ina3221,
-                            &bat->v_b1, &bat->v_b2, &bat->v_b3,
-                            &bat->delta_mv) ||
-        !_cells_sane(bat->v_b1, bat->v_b2, bat->v_b3, bat->delta_mv)) {
+    float v_b1 = 0.0f;
+    float v_b2 = 0.0f;
+    float v_b3 = 0.0f;
+    float delta_mv = 0.0f;
+    bool cells_ok = ina3221_read_cells(bat->ina3221,
+                                       &v_b1, &v_b2, &v_b3,
+                                       &delta_mv);
+    if (cells_ok) {
+        v_b1 *= cfg->cell1_v_gain;
+        v_b2 *= cfg->cell2_v_gain;
+        v_b3 *= cfg->cell3_v_gain;
+        {
+            float v_min = fminf(v_b1, fminf(v_b2, v_b3));
+            float v_max = fmaxf(v_b1, fmaxf(v_b2, v_b3));
+            delta_mv = (v_max - v_min) * 1000.0f;
+        }
+        cells_ok = _cells_sane(v_b1, v_b2, v_b3, delta_mv);
+    }
+    if (!cells_ok) {
         printf("[BAT] ina3221 fail/sanity\n");
         bat->delta_mv = 999.0f;
         _mark_stale(bat, 2);
@@ -190,6 +210,10 @@ void bat_read_sensors(Battery *bat) {
             }
         }
     } else {
+        bat->v_b1 = v_b1;
+        bat->v_b2 = v_b2;
+        bat->v_b3 = v_b3;
+        bat->delta_mv = delta_mv;
         _mark_valid(bat, 2);
     }
 
@@ -339,6 +363,7 @@ void bat_emergency_off(Battery *bat) {
 // ── Snapshot ─────────────────────────────────────────────────
 void bat_snapshot(const Battery *bat, BatSnapshot *out) {
     out->voltage     = bat->voltage;
+    out->v_chg_bus   = bat->v_chg_bus;
     out->i_dis       = bat->i_dis;
     out->i_chg       = bat->i_chg;
     out->i_net       = bat->i_net;

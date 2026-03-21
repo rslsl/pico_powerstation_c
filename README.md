@@ -2,6 +2,20 @@
 
 [Українська](#українська) | [English](#english)
 
+## Interface Screens
+
+### Home / System
+
+![Home screen](docs/images/ui-home.png)
+
+### Battery Info
+
+![Battery info screen](docs/images/ui-battery.png)
+
+### Charging
+
+![Charging screen](docs/images/ui-charging.jpg)
+
 ## Українська
 
 Прошивка для Raspberry Pi Pico / RP2040 для портативної power station з моніторингом батареї, захисною логікою, UI на ST7789 та модульною C/C++ кодовою базою.
@@ -11,14 +25,15 @@
 - BMS-логіку з оцінкою SOC/SOH
 - драйвери сенсорів і периферії для RP2040
 - UI для дисплея ST7789 240x280
+- меню налаштувань і калібрування датчиків
 - допоміжні build-цілі для перевірки дисплея та нового pinout
-
 
 ## Ключові особливості
 
 - Двоядерна архітектура: Core0 виконує опитування сенсорів, BMS-логіку, захист і UI polling, а Core1 обслуговує дисплей.
 - Модульна структура коду з поділом на `drivers`, `bms` і `app`.
 - Конвеєр відмальовування ST7789 з DMA-орієнтованим підходом.
+- Калібрування струму та напруги за еталонним виміром через меню, зі збереженням параметрів у flash.
 - Підтримка як основної firmware-цілі, так і окремих апаратних smoke test.
 
 ## Апаратний стек
@@ -43,6 +58,7 @@ pico_powerstation_c/
 |  |- drivers/      hardware drivers
 |  `- third_party/  ST7789 support library
 |- ui_assets/       PNG assets, RGB565 headers, previews
+|- docs/images/     README screenshots
 |- tmp/pdfs/        helper script for PDF generation
 `- BUILD.md         detailed build notes
 ```
@@ -92,21 +108,22 @@ build/pico_powerstation.uf2
 
 ## English
 
-Raspberry Pi Pico / RP2040 firmware for a portable power station with battery monitoring, protection logic, ST7789 UI, and a modular C/C++ codebase.
+Raspberry Pi Pico / RP2040 firmware for a portable power station with battery monitoring, protection logic, an ST7789 UI, and a modular C/C++ codebase.
 
 The project includes:
 
 - BMS logic with SOC/SOH estimation
 - sensor and peripheral drivers for the RP2040 platform
 - a 240x280 ST7789-based UI
+- runtime settings and sensor calibration menus
 - auxiliary build targets for display and pinout smoke tests
-
 
 ## Highlights
 
 - Dual-core layout: Core0 handles sensing, BMS logic, protection, and UI polling; Core1 is used for display work.
 - Modular source tree split into `drivers`, `bms`, and `app`.
 - ST7789 display pipeline with DMA-oriented rendering flow.
+- Reference-based current and voltage calibration flow with persistent flash storage.
 - Support for both the main firmware image and small standalone hardware tests.
 
 ## Hardware Stack
@@ -131,6 +148,7 @@ pico_powerstation_c/
 |  |- drivers/      hardware drivers
 |  `- third_party/  ST7789 support library
 |- ui_assets/       PNG assets, RGB565 headers, previews
+|- docs/images/     README screenshots
 |- tmp/pdfs/        helper script for PDF generation
 `- BUILD.md         detailed build notes
 ```
