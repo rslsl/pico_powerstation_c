@@ -6,11 +6,11 @@
 
 ### Home / System
 
-![Home screen](docs/images/ui-home.png)
+![Home screen](docs/images/ui-home.jpg)
 
 ### Battery Info
 
-![Battery info screen](docs/images/ui-battery.png)
+![Battery info screen](docs/images/ui-battery.jpg)
 
 ### Charging
 
