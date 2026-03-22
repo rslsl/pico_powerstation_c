@@ -111,7 +111,6 @@ build/pico_powerstation.uf2
 
 ## Примітки
 
-- Репозиторій зберігає вихідний код та UI-асети, а згенеровані build-артефакти ігноруються.
 - `memmap_16mb.ld` доступний для збірок під 16 MB flash.
 
 ---
@@ -211,5 +210,5 @@ For more detailed notes, flash layout details, and build guidance, see `BUILD.md
 
 ## Notes
 
-- The repository tracks source code and UI assets, while generated build outputs are ignored.
+
 - `memmap_16mb.ld` is available for 16 MB flash builds when needed.
