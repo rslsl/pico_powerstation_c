@@ -28,6 +28,16 @@
 - меню налаштувань і калібрування датчиків
 - допоміжні build-цілі для перевірки дисплея та нового pinout
 
+## Короткий Changelog
+
+### v1.2.0
+
+- виправлено зависання в `Boot Diagnostics` під час ранньої міграції `SOH`
+- додано захист від раннього запису в flash: `startup holdoff` і фаза стабілізації `SOC`
+- додано відсіювання невалідних даних перед записом `SOH` і `Stats` у flash
+- покращено екран калібровки: усереднення вимірів, мінімальний струм для калібрування шунта, індикатор похибки
+- стабілізовано ETA/SOH, інтеграцію `Rint` в EKF, OCV таблицю та захисну логіку
+
 ## Ключові особливості
 
 - Двоядерна архітектура: Core0 виконує опитування сенсорів, BMS-логіку, захист і UI polling, а Core1 обслуговує дисплей.
@@ -117,6 +127,16 @@ The project includes:
 - a 240x280 ST7789-based UI
 - runtime settings and sensor calibration menus
 - auxiliary build targets for display and pinout smoke tests
+
+## Short Changelog
+
+### v1.2.0
+
+- fixed boot hangs caused by early `SOH` migration during `Boot Diagnostics`
+- added flash save protection with `startup holdoff` and an initial `SOC` settling phase
+- added invalid-data filtering before writing `SOH` and `Stats` payloads to flash
+- improved the calibration screen with measurement averaging, a minimum-current guard, and an error indicator
+- hardened ETA/SOH behavior, `Rint` integration into EKF, the OCV table, and protection logic
 
 ## Highlights
 
