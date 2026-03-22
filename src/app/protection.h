@@ -44,6 +44,7 @@
 #define PROT_DEBOUNCE_WARN  2    // 2 × LOGIC_MS = 200 ms
 #define PROT_DEBOUNCE_CUT   3    // 3 × LOGIC_MS = 300 ms
 #define PROT_CLEAR_DEBOUNCE 5    // must be clear for 5 samples to deactivate WARN
+#define PROT_I2C_RECOVERY_SAMPLES 50
 
 // ── Hysteresis clear thresholds (alarm clears above these values) ────────
 // Prevents flapping at the boundary.
@@ -55,8 +56,8 @@
 #define CELL_CUT_CLR_MARGIN_V       0.03f
 #define DELTA_WARN_CLR_MARGIN_MV   15.0f
 #define DELTA_CUT_CLR_MARGIN_MV    20.0f
-#define IDIS_WARN_CLR_MARGIN_A      3.0f
-#define IDIS_CUT_CLR_MARGIN_A       5.0f
+#define IDIS_WARN_CLR_MARGIN_A      8.0f
+#define IDIS_CUT_CLR_MARGIN_A       8.0f
 #define TEMP_BAT_WARN_CLR_MARGIN_C  3.0f
 #define TEMP_BAT_BUZZ_CLR_MARGIN_C  3.0f
 #define TEMP_BAT_SAFE_CLR_MARGIN_C  5.0f
@@ -82,6 +83,9 @@ typedef struct {
     // P2.9: debounce counters (index = alarm bit position 0..19)
     uint8_t   set_count[PROT_NUM_ALARMS];    // consecutive samples above threshold
     uint8_t   clear_count[PROT_NUM_ALARMS];  // consecutive samples below clear threshold
+    uint32_t  ocp_last_cut_ms;
+    uint8_t   ocp_cut_strikes;
+    bool      ocp_cut_holdoff;
 } Protection;
 
 void     prot_init(Protection *prot, PowerControl *pwr);

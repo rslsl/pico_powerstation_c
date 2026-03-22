@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "bms_ekf.h"
+#include "bms_predictor.h"
 #include "bms_soh.h"
 #include "../drivers/ina226.h"
 #include "../drivers/ina3221.h"
@@ -40,6 +41,7 @@ typedef struct {
     float    soc, soc_std, remaining_wh, r0_mohm;
     float    soh, efc;
     int      time_min;
+    int      soh_rul_cycles;
     float    pred_confidence;
 
     // States
@@ -64,13 +66,22 @@ typedef struct {
 
     // OCV / HPPC internal
     uint32_t _t_idle_ms;
+    uint32_t _discharge_active_ms;
+    float    _v_before_idle;
+    float    _i_before_idle;
     float    _v_prev, _i_prev;
 
     // P1.4: cycle boundary detection
     bool     _was_discharging;   // true if i_net > discharge threshold last tick
+    bool     _eta_discharging;
+    float    _eta_pause_s;
+    uint32_t _eta_log_ms;
+    float    eta_usable_wh;
+    float    eta_cutoff_soc;
 
     // BMS algorithms
     BmsEkf   ekf;
+    Predictor pred;
     BmsSoh   soh_est;
 
     uint32_t _t_last_logic_ms;
@@ -85,9 +96,10 @@ void bat_init(Battery *bat,
 
 void bat_read_sensors(Battery *bat);
 void bat_update_bms  (Battery *bat, float dt_s);
-void bat_save        (Battery *bat);
+bool bat_save        (Battery *bat);
 void bat_emergency_off(Battery *bat);   // P0.1: now real implementation
 void bat_apply_settings(Battery *bat, float capacity_ah);
+void bat_seed_predictor(Battery *bat, float baseline_power_w, float peukert_n);
 
 // FMEA-02: true only if measurement group bit is valid and not stale
 bool bat_meas_fresh(const Battery *bat, uint8_t group_bit);
@@ -101,6 +113,7 @@ typedef struct {
     float    soc, soc_std, remaining_wh, r0_mohm, soh, efc;
     bool     is_charging, is_idle;
     int      time_min;
+    int      soh_rul_cycles;
     float    pred_confidence;
     uint8_t  temp_bat_status, temp_inv_status;
     // P1.5: expose correct energy totals

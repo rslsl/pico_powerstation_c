@@ -47,7 +47,8 @@
 
 // Shunts and INA226 scaling
 #define SHUNT_DIS_MOHM      0.75f
-#define SHUNT_CHG_MOHM      0.75f
+// Charge path uses a separate INA226 channel and field calibration trends close to 0.95 mOhm.
+#define SHUNT_CHG_MOHM      0.95f
 #define IMAX_DIS_A          100.0f
 #define IMAX_CHG_A          50.0f
 
@@ -140,6 +141,12 @@
 #define LOG_FLUSH_MS        3600000
 #define SAVE_SOC_DELTA_PCT  5.0f
 #define SAVE_SOH_DELTA      0.005f
+#define SAVE_STARTUP_HOLDOFF_MS   60000u
+#define SAVE_SOC_SETTLE_MS        15000u
+#define SAVE_SOC_SETTLE_SAMPLE_MS 1000u
+#define SAVE_SOC_SETTLE_RATE_PCT_S 0.35f
+#define SAVE_SOC_STD_MAX_PCT      8.0f
+#define BAT_R0_NOMINAL_OHM  0.020f
 #define VBAT_BROWNOUT_V     9.5f
 #define OCV_SETTLE_MS       30000
 #define OCV_IDLE_A          0.5f
@@ -185,7 +192,7 @@ CFG_STATIC_ASSERT((FLASH_LOG_OFFSET + FLASH_LOG_SIZE) <= FLASH_TOTAL, "Log regio
 
 // Firmware version
 #ifndef FW_VERSION
-#define FW_VERSION  "v4.0-C"
+#define FW_VERSION  "v1.2.0"
 #endif
 
 // USB bring-up mode:

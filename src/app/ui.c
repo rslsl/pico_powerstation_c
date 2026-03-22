@@ -47,6 +47,9 @@ static const PortId _PORT_MENU_IDS[] = {
 #define POWEROFF_AUDIO_CUE3_MS 1850u
 #define CAL_GAIN_MIN 0.80f
 #define CAL_GAIN_MAX 1.20f
+#define CAL_MEASURED_BUF_N 10
+#define CAL_MEASURED_SAMPLE_MS 120u
+#define CAL_CURRENT_MIN_A 1.0f
 
 typedef enum {
     CAL_SENSOR_DISCHARGE = 0,
@@ -268,17 +271,66 @@ static float _cal_current_result(const SystemSettings *cfg, CalTarget target) {
     }
 }
 
-static float _cal_preview_result(const SystemSettings *cfg, const BatSnapshot *bat,
+static bool _cal_live_valid(CalTarget target, float live_value) {
+    if (!_finitef_ui(live_value)) return false;
+    return _cal_is_current(target) ? (live_value >= 0.0f) : (live_value > 0.0f);
+}
+
+static void _cal_reset_measured(UI *ui) {
+    memset(ui->cal_measured_buf, 0, sizeof(ui->cal_measured_buf));
+    ui->cal_measured_idx = 0;
+    ui->cal_measured_n = 0;
+    ui->cal_measured_avg = 0.0f;
+    ui->cal_measured_last_ms = 0u;
+}
+
+static void _cal_push_measured(UI *ui, float measured_value) {
+    if (!_finitef_ui(measured_value) || measured_value < 0.0f) return;
+
+    ui->cal_measured_buf[ui->cal_measured_idx] = measured_value;
+    ui->cal_measured_idx = (ui->cal_measured_idx + 1) % CAL_MEASURED_BUF_N;
+    if (ui->cal_measured_n < CAL_MEASURED_BUF_N) ui->cal_measured_n++;
+
+    float sum = 0.0f;
+    for (int i = 0; i < ui->cal_measured_n; ++i) {
+        sum += ui->cal_measured_buf[i];
+    }
+    ui->cal_measured_avg = sum / (float)ui->cal_measured_n;
+}
+
+static float _cal_measured_value_ui(const UI *ui, const BatSnapshot *bat, CalTarget target) {
+    if (ui && ui->state == S_CAL_EDIT &&
+        ui->cal_target == (uint8_t)target &&
+        ui->cal_measured_n > 0 &&
+        _cal_live_valid(target, ui->cal_measured_avg)) {
+        return ui->cal_measured_avg;
+    }
+    return _cal_live_value(bat, target);
+}
+
+static float _cal_measured_value_rs(const FullUiSnapshot *rs, CalTarget target) {
+    if (rs &&
+        rs->state == S_CAL_EDIT &&
+        rs->cal_target == (uint8_t)target &&
+        rs->cal_measured_n > 0 &&
+        _cal_live_valid(target, rs->cal_measured_avg)) {
+        return rs->cal_measured_avg;
+    }
+    return _cal_live_value(&rs->bat, target);
+}
+
+static float _cal_preview_result(const SystemSettings *cfg, float live_value,
                                  CalTarget target, float ref_value) {
-    float live_value = _cal_live_value(bat, target);
     float current_result = _cal_current_result(cfg, target);
 
-    if (!_finitef_ui(live_value) || !_finitef_ui(ref_value) ||
-        live_value <= 0.0f || ref_value <= 0.0f) {
+    if (!_cal_live_valid(target, live_value) || !_finitef_ui(ref_value) || ref_value <= 0.0f) {
         return current_result;
     }
 
     if (_cal_is_current(target)) {
+        if (live_value < CAL_CURRENT_MIN_A) {
+            return current_result;
+        }
         float next = current_result * live_value / ref_value;
         return _clampf_local(next, 0.10f, 5.0f);
     }
@@ -295,7 +347,12 @@ static void _cal_prepare(UI *ui, CalTarget target) {
     float saved_ref = _cal_saved_ref(cfg, target);
 
     ui->cal_target = (uint8_t)target;
-    if (_cal_target_has_live_value(ui->snap, target) && _finitef_ui(live_value) && live_value > 0.0f) {
+    _cal_reset_measured(ui);
+    if (_cal_target_has_live_value(ui->snap, target) &&
+        _cal_live_valid(target, live_value)) {
+        _cal_push_measured(ui, live_value);
+    }
+    if (_cal_target_has_live_value(ui->snap, target) && _cal_live_valid(target, live_value)) {
         ui->cal_ref_value = live_value;
     } else if (_finitef_ui(saved_ref) && saved_ref > 0.0f) {
         ui->cal_ref_value = saved_ref;
@@ -441,43 +498,45 @@ static void _confirm_apply(UI *ui) {
     } else if ((UiConfirmAction)ui->confirm_kind == UI_CONFIRM_APPLY_CALIB) {
         SystemSettings cfg;
         CalTarget target = _clampf_cal_target(ui->cal_target);
-        float live_value = _cal_live_value(ui->snap, target);
+        float live_value = _cal_measured_value_ui(ui, ui->snap, target);
         float ref_value = ui->cal_ref_value;
 
         if (!_cal_target_has_live_value(ui->snap, target) ||
             !_finitef_ui(live_value) || !_finitef_ui(ref_value) ||
             live_value <= 0.0f || ref_value <= 0.0f) {
             ui_toast(ui, "Calibration source unavailable");
+        } else if (_cal_is_current(target) && live_value < CAL_CURRENT_MIN_A) {
+            ui_toast(ui, "Need >=1A for current cal");
         } else {
             settings_copy(&cfg);
 
             switch (target) {
                 case CAL_TARGET_DIS_CURRENT:
-                    cfg.shunt_dis_mohm = _cal_preview_result(&cfg, ui->snap, target, ref_value);
+                    cfg.shunt_dis_mohm = _cal_preview_result(&cfg, live_value, target, ref_value);
                     cfg.cal_ref_dis_current_a = ref_value;
                     break;
                 case CAL_TARGET_DIS_VOLTAGE:
-                    cfg.pack_dis_v_gain = _cal_preview_result(&cfg, ui->snap, target, ref_value);
+                    cfg.pack_dis_v_gain = _cal_preview_result(&cfg, live_value, target, ref_value);
                     cfg.cal_ref_dis_voltage_v = ref_value;
                     break;
                 case CAL_TARGET_CHG_CURRENT:
-                    cfg.shunt_chg_mohm = _cal_preview_result(&cfg, ui->snap, target, ref_value);
+                    cfg.shunt_chg_mohm = _cal_preview_result(&cfg, live_value, target, ref_value);
                     cfg.cal_ref_chg_current_a = ref_value;
                     break;
                 case CAL_TARGET_CHG_VOLTAGE:
-                    cfg.pack_chg_v_gain = _cal_preview_result(&cfg, ui->snap, target, ref_value);
+                    cfg.pack_chg_v_gain = _cal_preview_result(&cfg, live_value, target, ref_value);
                     cfg.cal_ref_chg_voltage_v = ref_value;
                     break;
                 case CAL_TARGET_CELL1_VOLTAGE:
-                    cfg.cell1_v_gain = _cal_preview_result(&cfg, ui->snap, target, ref_value);
+                    cfg.cell1_v_gain = _cal_preview_result(&cfg, live_value, target, ref_value);
                     cfg.cal_ref_cell1_v = ref_value;
                     break;
                 case CAL_TARGET_CELL2_VOLTAGE:
-                    cfg.cell2_v_gain = _cal_preview_result(&cfg, ui->snap, target, ref_value);
+                    cfg.cell2_v_gain = _cal_preview_result(&cfg, live_value, target, ref_value);
                     cfg.cal_ref_cell2_v = ref_value;
                     break;
                 case CAL_TARGET_CELL3_VOLTAGE:
-                    cfg.cell3_v_gain = _cal_preview_result(&cfg, ui->snap, target, ref_value);
+                    cfg.cell3_v_gain = _cal_preview_result(&cfg, live_value, target, ref_value);
                     cfg.cal_ref_cell3_v = ref_value;
                     break;
                 default:
@@ -597,6 +656,8 @@ static void _rs_publish(UI *ui) {
     rs->cal_sensor = ui->cal_sensor;
     rs->cal_target = ui->cal_target;
     rs->cal_ref_value = ui->cal_ref_value;
+    rs->cal_measured_avg = ui->cal_measured_avg;
+    rs->cal_measured_n = (uint8_t)ui->cal_measured_n;
     if (ui->ok_btn_held && _can_hold_poweroff(ui->state)) {
         uint32_t now = to_ms_since_boot(get_absolute_time());
         uint32_t held = now - ui->ok_btn_press_ms;
@@ -721,6 +782,21 @@ static void _anim_tick(UI *ui, uint32_t now) {
     }
 }
 
+static void _cal_sample_tick(UI *ui, uint32_t now) {
+    if (ui->state != S_CAL_EDIT) return;
+    if ((now - ui->cal_measured_last_ms) < CAL_MEASURED_SAMPLE_MS) return;
+
+    CalTarget target = _clampf_cal_target(ui->cal_target);
+    float live_value = _cal_live_value(ui->snap, target);
+    if (_cal_target_has_live_value(ui->snap, target) &&
+        _finitef_ui(live_value) &&
+        live_value > 0.0f) {
+        _cal_push_measured(ui, live_value);
+        ui->dirty = true;
+    }
+    ui->cal_measured_last_ms = now;
+}
+
 // FIX #2: extern TCA9548A g_tca (object, not pointer)
 static void _start_scan(UI *ui) {
     extern TCA9548A g_tca;
@@ -840,6 +916,7 @@ static void _long_press(UI *ui) {
 void ui_poll(UI *ui) {
     uint32_t now = to_ms_since_boot(get_absolute_time());
     _anim_tick(ui, now);
+    _cal_sample_tick(ui, now);
 
     const uint8_t pins[3] = { BTN_UP_PIN, BTN_OK_PIN, BTN_DOWN_PIN };
     int nav_step = 0;
@@ -1559,6 +1636,19 @@ static void _draw_menu_footer(Display *d, const FullUiSnapshot *rs,
     } else {
         _draw_footer_hint(d, normal_left, normal_right);
     }
+}
+
+static int _cycle_life_remaining(const FullUiSnapshot *rs) {
+    const BatSnapshot *b = &rs->bat;
+    if (b->soh_rul_cycles > 0) {
+        return b->soh_rul_cycles;
+    }
+
+    float soh_deg = 100.0f - rs->soh_last;
+    float cyc_per_pct = (soh_deg > 0.5f && rs->efc_total > 5.0f)
+                        ? rs->efc_total / soh_deg : 10.0f;
+    float soh_remain = rs->soh_last - 80.0f;
+    return (soh_remain > 0.0f) ? (int)(soh_remain * cyc_per_pct) : 0;
 }
 
 static void _draw_confirm_overlay(Display *d, const FullUiSnapshot *rs) {
@@ -2505,7 +2595,7 @@ static void _render_cal_item_ref(Display *d, const FullUiSnapshot *rs) {
         char value_buf[20];
         float live_value = _cal_live_value(&rs->bat, target);
         bool live_ok = _cal_target_has_live_value(&rs->bat, target) &&
-                       _finitef_ui(live_value) && live_value > 0.0f;
+                       _cal_live_valid(target, live_value);
 
         if (live_ok) {
             if (_cal_is_current(target)) snprintf(value_buf, sizeof(value_buf), "%.2fA", live_value);
@@ -2530,17 +2620,27 @@ static void _render_cal_item_ref(Display *d, const FullUiSnapshot *rs) {
 static void _render_cal_edit_ref(Display *d, const FullUiSnapshot *rs) {
     CalSensor sensor = _clampf_cal_sensor(rs->cal_sensor);
     CalTarget target = _clampf_cal_target(rs->cal_target);
-    float live_value = _cal_live_value(&rs->bat, target);
+    float live_value = _cal_measured_value_rs(rs, target);
     float saved_ref = _cal_saved_ref(&rs->settings, target);
     float current_result = _cal_current_result(&rs->settings, target);
-    float preview_result = _cal_preview_result(&rs->settings, &rs->bat, target, rs->cal_ref_value);
+    float preview_result = _cal_preview_result(&rs->settings, live_value, target, rs->cal_ref_value);
     bool live_ok = _cal_target_has_live_value(&rs->bat, target) &&
-                   _finitef_ui(live_value) && live_value > 0.0f;
+                   _cal_live_valid(target, live_value);
+    bool low_current = _cal_is_current(target) && live_ok && live_value < CAL_CURRENT_MIN_A;
+    float error_pct = (live_ok && rs->cal_ref_value > 0.0f)
+                    ? ((live_value - rs->cal_ref_value) / rs->cal_ref_value) * 100.0f
+                    : 0.0f;
     char live_buf[20];
+    char err_buf[20];
     char ref_buf[20];
     char saved_buf[20];
     char active_buf[20];
     char preview_buf[20];
+    const char *note_text;
+    uint16_t note_col;
+    uint16_t live_col;
+    uint16_t err_col;
+    uint16_t preview_col;
 
     _draw_grid_background(d);
     _draw_screen_title(d, "CALIBRATION", _cal_sensor_label(sensor));
@@ -2550,6 +2650,12 @@ static void _render_cal_edit_ref(Display *d, const FullUiSnapshot *rs) {
         else                         snprintf(live_buf, sizeof(live_buf), "%.3fV", live_value);
     } else {
         snprintf(live_buf, sizeof(live_buf), "NO DATA");
+    }
+
+    if (live_ok && rs->cal_ref_value > 0.0f) {
+        snprintf(err_buf, sizeof(err_buf), "%+.1f%%", error_pct);
+    } else {
+        snprintf(err_buf, sizeof(err_buf), "--");
     }
 
     if (_cal_is_current(target)) snprintf(ref_buf, sizeof(ref_buf), "%.2fA", rs->cal_ref_value);
@@ -2570,15 +2676,41 @@ static void _render_cal_edit_ref(Display *d, const FullUiSnapshot *rs) {
         snprintf(preview_buf, sizeof(preview_buf), "%.4fX", preview_result);
     }
 
+    if (!live_ok) {
+        live_col = D_ORANGE;
+    } else if (low_current) {
+        live_col = D_YELLOW;
+    } else {
+        live_col = D_GREEN;
+    }
+
+    if (!live_ok || rs->cal_ref_value <= 0.0f) {
+        err_col = D_SUBTEXT;
+    } else if (fabsf(error_pct) < 1.0f) {
+        err_col = D_GREEN;
+    } else if (fabsf(error_pct) < 5.0f) {
+        err_col = D_ORANGE;
+    } else {
+        err_col = D_RED;
+    }
+
+    preview_col = low_current ? D_SUBTEXT : UI_NEON_GRN;
+    if (low_current) {
+        note_text = "MIN 1A FOR ACCURATE CAL";
+        note_col = D_ORANGE;
+    } else {
+        note_text = rs->edit_active ? "OK TO SAVE + REBOOT" : "OK TO EDIT REFERENCE";
+        note_col = D_SUBTEXT;
+    }
+
     _draw_list_card(d, 12, 40, 216, 22, "TARGET", _cal_target_label(target), UI_NEON_BLUE, false);
-    _draw_list_card(d, 12, 68, 216, 22, "MEASURED", live_buf, live_ok ? D_GREEN : D_ORANGE, false);
-    _draw_list_card(d, 12, 96, 216, 22, "REFERENCE", ref_buf, D_ACCENT, rs->edit_active);
-    _draw_list_card(d, 12, 124, 216, 22, "LAST REF", saved_buf, D_TEXT, false);
-    _draw_list_card(d, 12, 152, 216, 22, _cal_result_label(target), active_buf, UI_NEON_AMB, false);
-    _draw_list_card(d, 12, 180, 216, 22, "NEW VALUE", preview_buf, UI_NEON_GRN, false);
-    _draw_list_card(d, 12, 214, 216, 18, "NOTE",
-                    rs->edit_active ? "OK TO SAVE + REBOOT" : "OK TO EDIT REFERENCE",
-                    D_SUBTEXT, false);
+    _draw_list_card(d, 12, 68, 216, 22, "MEASURED", live_buf, live_col, false);
+    _draw_list_card(d, 12, 96, 216, 22, "ERROR", err_buf, err_col, false);
+    _draw_list_card(d, 12, 124, 216, 22, "REFERENCE", ref_buf, D_ACCENT, rs->edit_active);
+    _draw_list_card(d, 12, 152, 216, 22, "LAST REF", saved_buf, D_TEXT, false);
+    _draw_list_card(d, 12, 180, 216, 22, _cal_result_label(target), active_buf, UI_NEON_AMB, false);
+    _draw_list_card(d, 12, 208, 216, 22, "NEW VALUE", preview_buf, preview_col, false);
+    _draw_list_card(d, 12, 238, 216, 18, "NOTE", note_text, note_col, false);
     _draw_menu_footer(d, rs, "OK=EDIT", "HOLD=BACK");
 }
 
@@ -2747,11 +2879,7 @@ static void __attribute__((unused)) _render_history_p2_legacy(Display *d, const 
     }
     y += 14;
 
-    float soh_deg = 100.0f - rs->soh_last;
-    float cyc_per_pct = (soh_deg > 0.5f && rs->efc_total > 5.0f)
-                        ? rs->efc_total / soh_deg : 10.0f;
-    float soh_remain  = rs->soh_last - 80.0f;
-    int   cyc_remain  = (soh_remain > 0.0f) ? (int)(soh_remain * cyc_per_pct) : 0;
+    int cyc_remain = _cycle_life_remaining(rs);
     uint16_t cr = (cyc_remain > 500) ? D_GREEN : (cyc_remain > 200) ? D_ORANGE : D_RED;
     snprintf(buf, sizeof(buf), "Est. remain: ~%d cycles", cyc_remain);
     disp_text(d, 4, y, buf, cr); y += 14;
@@ -2844,11 +2972,7 @@ static void _render_history_p2(Display *d, const FullUiSnapshot *rs) {
     char peak_a_buf[16];
     char peak_w_buf[16];
     const BatSnapshot *b = &rs->bat;
-    float soh_deg = 100.0f - rs->soh_last;
-    float cyc_per_pct = (soh_deg > 0.5f && rs->efc_total > 5.0f)
-                        ? rs->efc_total / soh_deg : 10.0f;
-    float soh_remain = rs->soh_last - 80.0f;
-    int cyc_remain = (soh_remain > 0.0f) ? (int)(soh_remain * cyc_per_pct) : 0;
+    int cyc_remain = _cycle_life_remaining(rs);
     uint16_t cyc_col = (cyc_remain > 500) ? D_GREEN : (cyc_remain > 200) ? D_ORANGE : D_RED;
 
     _draw_grid_background(d);

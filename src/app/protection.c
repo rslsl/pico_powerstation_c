@@ -10,6 +10,7 @@
 #include "protection.h"
 #include "config.h"
 #include "system_settings.h"
+#include "pico/stdlib.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -71,7 +72,12 @@ static void _debounce(Protection *prot, int bit,
 // ── Main protection check ─────────────────────────────────────
 void prot_check(Protection *prot, const Battery *bat) {
     const SystemSettings *cfg = settings_get();
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
     prot->alarms_prev = prot->alarms;
+    if (prot->ocp_cut_strikes > 0u &&
+        (now_ms - prot->ocp_last_cut_ms) > 60000u) {
+        prot->ocp_cut_strikes = 0u;
+    }
 
     // ── Debounced alarm evaluation ────────────────────────────
 
@@ -216,6 +222,44 @@ void prot_check(Protection *prot, const Battery *bat) {
     new_alarms = prot->alarms & ~prot->alarms_prev;
     if (new_alarms) prot->alarm_count++;
 
+    if ((prot->latched & ALARM_I2C_FAULT) &&
+        !i2c_stale &&
+        prot->clear_count[14] >= PROT_I2C_RECOVERY_SAMPLES) {
+        prot->latched &= ~ALARM_I2C_FAULT;
+        prot->alarms &= ~ALARM_I2C_FAULT;
+        prot->set_count[14] = 0;
+        prot->clear_count[14] = 0;
+        printf("[PROT] I2C fault auto-recovered after 5s stable sensors\n");
+    }
+
+    if (prot->ocp_cut_holdoff &&
+        (!pack_ok || bat->i_dis <= (IDIS_CUT_A - IDIS_CUT_CLR_MARGIN_A))) {
+        prot->ocp_cut_holdoff = false;
+    }
+
+    if (new_alarms & ALARM_OCP_CUT) {
+        bool second_strike = (prot->ocp_cut_strikes > 0u) &&
+                             ((now_ms - prot->ocp_last_cut_ms) <= 60000u) &&
+                             !prot->ocp_cut_holdoff;
+        prot->ocp_last_cut_ms = now_ms;
+        if (!second_strike) {
+            prot->ocp_cut_strikes = 1u;
+            prot->ocp_cut_holdoff = true;
+            prot->alarms &= ~ALARM_OCP_CUT;
+            prot->alarms |= ALARM_OCP_WARN;
+            prot->set_count[9] = 0;
+            prot->clear_count[9] = 0;
+            new_alarms &= ~ALARM_OCP_CUT;
+            if (!(prot->alarms_prev & ALARM_OCP_WARN)) {
+                new_alarms |= ALARM_OCP_WARN;
+            }
+            printf("[PROT] OCP strike 1/2: %.1fA warning only\n", bat->i_dis);
+        } else {
+            prot->ocp_cut_strikes = 2u;
+            prot->ocp_cut_holdoff = false;
+        }
+    }
+
     bool charge_block = (!cells_ok || !pack_ok || !tbat_ok || !chg_ok ||
                          (prot->alarms & (ALARM_DELTA_CUT | ALARM_TEMP_CUT |
                                           ALARM_I2C_FAULT | ALARM_CELL_CUT |
@@ -317,5 +361,7 @@ void prot_set_i2c_fault(Protection *prot, bool active) {
     if (active) {
         prot->alarms |= ALARM_I2C_FAULT;
         prot->latched |= ALARM_I2C_FAULT;
+        prot->set_count[14] = PROT_DEBOUNCE_CUT;
+        prot->clear_count[14] = 0;
     }
 }

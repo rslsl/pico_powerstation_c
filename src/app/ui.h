@@ -100,6 +100,8 @@ typedef struct {
     uint8_t cal_sensor;
     uint8_t cal_target;
     float cal_ref_value;
+    float cal_measured_avg;
+    uint8_t cal_measured_n;
 
     UiState state;
     int8_t cur[S_COUNT];
@@ -154,6 +156,11 @@ typedef struct {
     uint8_t cal_sensor;
     uint8_t cal_target;
     float cal_ref_value;
+    float cal_measured_buf[10];
+    int   cal_measured_idx;
+    int   cal_measured_n;
+    float cal_measured_avg;
+    uint32_t cal_measured_last_ms;
 
     float soc_anim;
     bool blink;

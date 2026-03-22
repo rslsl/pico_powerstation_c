@@ -37,7 +37,6 @@
 #include "drivers/st7789.h"
 #include "bms/battery.h"
 #include "bms/bms_logger.h"
-#include "bms/bms_predictor.h"
 #include "bms/bms_stats.h"
 #include "bms/bms_ocv.h"
 #include "app/power_control.h"
@@ -60,7 +59,6 @@ PowerSeq     g_pseq;
 Protection   g_prot;
 Buzzer       g_buz;
 BmsLogger    g_logger;
-Predictor    g_pred;
 BmsStats     g_stats;
 UI           g_ui;
 
@@ -70,6 +68,10 @@ static uint         g_bat_lock_num;
 
 static float g_last_saved_soc = -999.0f;
 static float g_last_saved_soh = -999.0f;
+static uint32_t g_save_boot_ms = 0u;
+static uint32_t g_save_soc_sample_ms = 0u;
+static uint32_t g_save_soc_stable_since_ms = 0u;
+static float g_save_soc_sample = 0.0f;
 static bool  g_inv_sensor_absent_logged = false;
 static bool  g_fan_forced_on = false;
 static volatile bool g_core1_ready = false;
@@ -121,27 +123,111 @@ static void _snapshot_update(void) {
     spin_unlock(g_bat_lock, s);
 }
 
+static inline bool _finitef_main(float v) {
+    return !isnan(v) && !isinf(v);
+}
+
 static void _check_brownout(void) {
     log_set_brownout(g_bat.voltage < VBAT_BROWNOUT_V);
 }
 
-static bool _should_save(void) {
+static bool _save_runtime_data_valid(void) {
     if (g_bat.voltage < VBAT_BROWNOUT_V) return false;
+    if (!bat_meas_fresh(&g_bat, MEAS_VALID_PACK)) return false;
+    if (!bat_meas_fresh(&g_bat, MEAS_VALID_CELLS)) return false;
+    if (!_finitef_main(g_bat.voltage) || g_bat.voltage < VBAT_BROWNOUT_V || g_bat.voltage > 15.0f) return false;
+    if (!_finitef_main(g_bat.soc) || g_bat.soc < 0.0f || g_bat.soc > 100.0f) return false;
+    if (!_finitef_main(g_bat.soh) || g_bat.soh < 0.0f || g_bat.soh > 100.0f) return false;
+    if (!_finitef_main(g_bat.soc_std) || g_bat.soc_std < 0.0f || g_bat.soc_std > SAVE_SOC_STD_MAX_PCT) return false;
+    if (!_finitef_main(g_bat.r0_mohm) ||
+        g_bat.r0_mohm < (EKF_R0_MIN * 1000.0f) ||
+        g_bat.r0_mohm > (EKF_R0_MAX * 1000.0f)) return false;
+    return true;
+}
+
+static void _save_guard_update(uint32_t ms_now) {
+    if (!_save_runtime_data_valid()) {
+        g_save_soc_sample_ms = ms_now;
+        g_save_soc_sample = _finitef_main(g_bat.soc) ? g_bat.soc : 0.0f;
+        g_save_soc_stable_since_ms = 0u;
+        return;
+    }
+
+    if (g_save_soc_sample_ms == 0u) {
+        g_save_soc_sample_ms = ms_now;
+        g_save_soc_sample = g_bat.soc;
+        g_save_soc_stable_since_ms = ms_now;
+        return;
+    }
+
+    uint32_t dt_ms = ms_now - g_save_soc_sample_ms;
+    if (dt_ms < SAVE_SOC_SETTLE_SAMPLE_MS) return;
+
+    float dt_s = (float)dt_ms * 0.001f;
+    float dsoc = fabsf(g_bat.soc - g_save_soc_sample);
+    float max_step = SAVE_SOC_SETTLE_RATE_PCT_S * dt_s;
+
+    if (dsoc <= max_step) {
+        if (g_save_soc_stable_since_ms == 0u) {
+            g_save_soc_stable_since_ms = ms_now;
+        }
+    } else {
+        g_save_soc_stable_since_ms = 0u;
+    }
+
+    g_save_soc_sample_ms = ms_now;
+    g_save_soc_sample = g_bat.soc;
+}
+
+static const char *_save_reject_reason(uint32_t ms_now) {
+    if (g_bat.voltage < VBAT_BROWNOUT_V) return "brownout";
+    if (!bat_meas_fresh(&g_bat, MEAS_VALID_PACK)) return "pack stale";
+    if (!bat_meas_fresh(&g_bat, MEAS_VALID_CELLS)) return "cells stale";
+    if (!_finitef_main(g_bat.soc) || g_bat.soc < 0.0f || g_bat.soc > 100.0f) return "soc invalid";
+    if (!_finitef_main(g_bat.soh) || g_bat.soh < 0.0f || g_bat.soh > 100.0f) return "soh invalid";
+    if (!_finitef_main(g_bat.soc_std) || g_bat.soc_std < 0.0f || g_bat.soc_std > SAVE_SOC_STD_MAX_PCT) return "soc unstable";
+    if (!_finitef_main(g_bat.r0_mohm) ||
+        g_bat.r0_mohm < (EKF_R0_MIN * 1000.0f) ||
+        g_bat.r0_mohm > (EKF_R0_MAX * 1000.0f)) return "r0 invalid";
+    if ((ms_now - g_save_boot_ms) < SAVE_STARTUP_HOLDOFF_MS) return "startup holdoff";
+    if (g_save_soc_stable_since_ms == 0u) return "soc settling";
+    if ((ms_now - g_save_soc_stable_since_ms) < SAVE_SOC_SETTLE_MS) return "soc settling";
+    return NULL;
+}
+
+static bool _should_save(void) {
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (_save_reject_reason(now_ms) != NULL) return false;
     return fabsf(g_bat.soc - g_last_saved_soc) >= SAVE_SOC_DELTA_PCT
         || fabsf(g_bat.soh - g_last_saved_soh) / 100.0f >= SAVE_SOH_DELTA;
 }
 
-static void _do_save(void) {
-    if (g_bat.voltage < VBAT_BROWNOUT_V) {
-        printf("[SAVE] skipped: brownout %.2fV\n", g_bat.voltage);
+static void _do_save(uint32_t ms_now) {
+    const char *reject = _save_reject_reason(ms_now);
+    if (reject) {
+        printf("[SAVE] skipped: %s SOC=%.1f%% std=%.2f V=%.2fV valid=0x%02X uptime=%lus\n",
+               reject, g_bat.soc, g_bat.soc_std, g_bat.voltage,
+               g_bat.meas_valid, (unsigned long)(ms_now / 1000u));
         return;
     }
-    bat_save(&g_bat);
+
+    bool bat_saved = bat_save(&g_bat);
     log_flush_header(&g_logger);
-    stats_save(&g_stats);
-    g_last_saved_soc = g_bat.soc;
-    g_last_saved_soh = g_bat.soh;
-    printf("[SAVE] SOC=%.1f%% SOH=%.1f%%\n", g_bat.soc, g_bat.soh);
+    bool stats_saved = stats_save(&g_stats);
+
+    if (bat_saved) {
+        g_last_saved_soc = g_bat.soc;
+        g_last_saved_soh = g_bat.soh;
+    }
+
+    if (bat_saved || stats_saved) {
+        printf("[SAVE] SOC=%.1f%% SOH=%.1f%% bat=%s stats=%s\n",
+               g_bat.soc, g_bat.soh,
+               bat_saved ? "ok" : "skip",
+               stats_saved ? "ok" : "skip");
+    } else {
+        printf("[SAVE] skipped: no valid payloads\n");
+    }
 }
 
 // в”Ђв”Ђ I2C recovery в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
@@ -483,10 +569,9 @@ static void _init_all(void) {
     prot_init(&g_prot, &g_pwr);
     log_init(&g_logger);
     stats_init(&g_stats);
-    pred_init(&g_pred, settings_get()->capacity_ah, settings_get()->pack_nominal_v);
-    pred_seed(&g_pred,
-              stats_predictor_baseline_power_w(&g_stats),
-              stats_predictor_peukert(&g_stats));
+    bat_seed_predictor(&g_bat,
+                       stats_predictor_baseline_power_w(&g_stats),
+                       stats_predictor_peukert(&g_stats));
 
     ui_init(&g_ui, &g_disp, &g_pwr, &g_pseq,
             &g_buz, &g_bat_snapshot, &g_prot, &g_stats, &g_logger,
@@ -521,10 +606,9 @@ static void _apply_runtime_settings(bool reconfigure_sensors) {
     }
 
     bat_apply_settings(&g_bat, cfg->capacity_ah);
-    pred_init(&g_pred, cfg->capacity_ah, cfg->pack_nominal_v);
-    pred_seed(&g_pred,
-              stats_predictor_baseline_power_w(&g_stats),
-              stats_predictor_peukert(&g_stats));
+    bat_seed_predictor(&g_bat,
+                       stats_predictor_baseline_power_w(&g_stats),
+                       stats_predictor_peukert(&g_stats));
     _snapshot_update();
 }
 
@@ -602,6 +686,10 @@ int main(void) {
     _snapshot_update();
 
     absolute_time_t now = get_absolute_time();
+    g_save_boot_ms = to_ms_since_boot(now);
+    g_save_soc_sample_ms = g_save_boot_ms;
+    g_save_soc_stable_since_ms = 0u;
+    g_save_soc_sample = _finitef_main(g_bat.soc) ? g_bat.soc : 0.0f;
     t_sensor = delayed_by_ms(now, SENSOR_MS);
     t_logic  = delayed_by_ms(now, LOGIC_MS);
     t_save   = delayed_by_ms(now, SAVE_MS);
@@ -613,6 +701,10 @@ int main(void) {
     absolute_time_t core1_deadline = delayed_by_ms(get_absolute_time(), 100);
     while (!g_core1_ready && absolute_time_diff_us(get_absolute_time(), core1_deadline) > 0) {
         tight_loop_contents();
+    }
+    if (g_core1_ready && g_bat.soh_est.migration_pending) {
+        printf("[SOH] committing deferred v3->v4 migration\n");
+        bat_save(&g_bat);
     }
     log_boot(&g_logger, g_bat.soc, g_bat.voltage);
     printf("[BOOT] done\n");
@@ -627,7 +719,7 @@ int main(void) {
     static float discharge_start_wh  = 0.0f;
     static float discharge_start_ah  = 0.0f;
     static float discharge_start_soc = 0.0f;
-    static uint32_t discharge_start_ms = 0;
+    static uint32_t discharge_active_ms = 0;
 
     while (1) {
         watchdog_update();
@@ -656,6 +748,7 @@ int main(void) {
             t_logic = delayed_by_ms(t_logic, LOGIC_MS);
 
             bat_update_bms(&g_bat, dt_s);
+            _save_guard_update(ms_now);
 
             BatSnapshot snap;
             uint32_t sv = spin_lock_blocking(g_bat_lock);
@@ -672,54 +765,45 @@ int main(void) {
             }
             prev_charge_active = snap.is_charging;
 
-            bool discharge_enter = !snap.is_charging && snap.i_net > 0.35f && snap.power_w > 3.0f;
-            bool discharge_hold  = !snap.is_charging && snap.i_net > 0.18f && snap.power_w > 1.0f;
+            bool discharge_enter = !snap.is_charging && snap.i_net > 0.50f && snap.power_w > 5.0f;
+            bool discharge_hold  = !snap.is_charging && snap.i_net > 0.40f && snap.power_w > 3.0f;
             bool discharge_active = prev_discharge_active ? discharge_hold : discharge_enter;
             if (!prev_discharge_active && discharge_active) {
                 discharge_start_wh = g_bat.soh_est.dis_wh_total;
                 discharge_start_ah = g_bat.soh_est.dis_ah_total;
                 discharge_start_soc = snap.soc / 100.0f;
-                discharge_start_ms = ms_now;
-                pred_init(&g_pred, settings_get()->capacity_ah, settings_get()->pack_nominal_v);
-                pred_seed(&g_pred,
-                          stats_predictor_baseline_power_w(&g_stats),
-                          stats_predictor_peukert(&g_stats));
+                discharge_active_ms = ms_now;
+                printf("[CYCLE] enter i=%.2fA P=%.1fW\n", snap.i_net, snap.power_w);
             } else if (prev_discharge_active && !discharge_active) {
                 float session_wh = g_bat.soh_est.dis_wh_total - discharge_start_wh;
                 float session_ah = g_bat.soh_est.dis_ah_total - discharge_start_ah;
-                float session_h = (discharge_start_ms > 0 && ms_now > discharge_start_ms)
-                                ? (float)(ms_now - discharge_start_ms) / 3600000.0f
-                                : 0.0f;
+                uint32_t discharge_dur_ms = (discharge_active_ms > 0 && ms_now > discharge_active_ms)
+                                          ? (ms_now - discharge_active_ms)
+                                          : 0u;
+                float session_h = (float)discharge_dur_ms / 3600000.0f;
                 float dod_frac = discharge_start_soc - (snap.soc / 100.0f);
                 if (session_wh < 0.0f) session_wh = 0.0f;
                 if (session_ah < 0.0f) session_ah = 0.0f;
                 if (dod_frac < 0.0f) dod_frac = 0.0f;
-                log_discharge_end(&g_logger, snap.soc, session_wh);
-                stats_record_discharge_session(&g_stats,
-                                               session_wh,
-                                               session_h,
-                                               session_ah,
-                                               dod_frac,
-                                               g_bat.soh_est.q_measured_ah,
-                                               settings_get()->pack_nominal_v);
-                g_bat.pred_confidence = 0.0f;
+                if (discharge_dur_ms >= 30000u) {
+                    printf("[CYCLE] end dur=%lus DoD=%.0f%%\n",
+                           (unsigned long)(discharge_dur_ms / 1000u),
+                           dod_frac * 100.0f);
+                    log_discharge_end(&g_logger, snap.soc, session_wh);
+                    stats_record_discharge_session(&g_stats,
+                                                   session_wh,
+                                                   session_h,
+                                                   session_ah,
+                                                   dod_frac,
+                                                   g_bat.soh_est.q_measured_ah,
+                                                   settings_get()->pack_nominal_v);
+                    bat_seed_predictor(&g_bat,
+                                       stats_predictor_baseline_power_w(&g_stats),
+                                       stats_predictor_peukert(&g_stats));
+                }
+                discharge_active_ms = 0u;
             }
             prev_discharge_active = discharge_active;
-
-            if (discharge_active) {
-                int pred_min = pred_update(&g_pred,
-                    snap.soc, snap.i_net, snap.power_w,
-                    snap.remaining_wh, snap.temp_bat, snap.soh / 100.0f,
-                    snap.r0_mohm * 0.001f);
-                g_bat.pred_confidence = g_pred.confidence;
-                if (pred_min > 0 && pred_min < 9999) {
-                    g_bat.time_min = pred_min;
-                } else {
-                    g_bat.time_min = 9999;
-                }
-            } else {
-                g_bat.pred_confidence = 0.0f;
-            }
 
             prot_check(&g_prot, &g_bat);
 
@@ -769,9 +853,10 @@ int main(void) {
 
         // Flash save
         bool time_save = (absolute_time_diff_us(tnow, t_save) <= 0);
-        if (g_bat.voltage >= VBAT_BROWNOUT_V && (time_save || _should_save())) {
+        uint32_t save_now_ms = to_ms_since_boot(tnow);
+        if (time_save || _should_save()) {
             if (time_save) t_save = delayed_by_ms(t_save, SAVE_MS);
-            _do_save();
+            _do_save(save_now_ms);
         }
 
         buz_tick(&g_buz);

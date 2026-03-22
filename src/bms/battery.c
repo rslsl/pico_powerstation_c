@@ -28,6 +28,34 @@ static inline bool _finitef(float v) {
     return !isnan(v) && !isinf(v);
 }
 
+static float _eta_cutoff_soc(const Battery *bat, float current_a, float temp_c) {
+    const SystemSettings *cfg = settings_get();
+    float cutoff_pack_v = fmaxf(cfg->vbat_cut_v, cfg->cell_cut_v * BAT_CELLS);
+    float ir_drop_v = fmaxf(bat->ekf.r0, EKF_R0_MIN) * fmaxf(current_a, 0.0f);
+    float guard_v = 0.06f;
+    float ocv_cut_pack_v = cutoff_pack_v + ir_drop_v + guard_v;
+    return _clamp(bms_ocv_pack_to_soc(ocv_cut_pack_v, temp_c), 0.0f, 0.98f);
+}
+
+static float _eta_usable_energy_wh(Battery *bat,
+                                   float soc_frac,
+                                   float usable_ah,
+                                   float current_a,
+                                   float temp_c) {
+    float soc_cut = _eta_cutoff_soc(bat, current_a, temp_c);
+    float usable_soc = _clamp(soc_frac - soc_cut, 0.0f, 1.0f);
+    float v_now = bms_ocv_pack(soc_frac, temp_c);
+    float v_cut = bms_ocv_pack(soc_cut, temp_c);
+    float avg_v = 0.5f * (v_now + v_cut);
+    if (!_finitef(avg_v) || avg_v < 1.0f) {
+        avg_v = settings_get()->pack_nominal_v;
+    }
+
+    bat->eta_cutoff_soc = soc_cut;
+    bat->eta_usable_wh = usable_soc * usable_ah * avg_v;
+    return bat->eta_usable_wh;
+}
+
 static bool _sensor_vi_sane(float v, float i) {
     return _finitef(v) && _finitef(i) &&
            v >= SENSOR_SANITY_V_MIN && v <= SENSOR_SANITY_V_MAX &&
@@ -100,14 +128,21 @@ void bat_init(Battery *bat,
     bat->v_b1 = bat->v_b2 = bat->v_b3 = cfg->pack_nominal_v / BAT_CELLS;
     bat->meas_valid = 0;  // all stale at init
 
-    soh_init(&bat->soh_est, cfg->capacity_ah, SOH_R0_NOMINAL);
+    soh_init(&bat->soh_est, cfg->capacity_ah, BAT_R0_NOMINAL_OHM);
     soh_load(&bat->soh_est);
     bat_apply_settings(bat, cfg->capacity_ah);
     bat->soh = bat->soh_est.soh * 100.0f;
     bat->efc = bat->soh_est.efc;
+    bat->soh_rul_cycles = soh_rul_cycles(&bat->soh_est);
+    pred_init(&bat->pred, cfg->capacity_ah, cfg->pack_nominal_v);
 
     float soc_init = bms_ocv_pack_to_soc(bat->voltage, bat->temp_bat);
     ekf_init(&bat->ekf, soc_init);
+    rint_init(&bat->ekf.rint, bat->soh_est.soh);
+    rint_update_soc(&bat->ekf.rint, soc_init, bat->temp_bat);
+    bat->ekf.r0 = rint_r0(&bat->ekf.rint, bat->temp_bat);
+    bat->ekf.r1 = rint_r1(&bat->ekf.rint, bat->temp_bat);
+    bat->ekf.c1 = rint_c1(&bat->ekf.rint);
     bat->soc = soc_init * 100.0f;
     bat->pred_confidence = 0.0f;
 
@@ -127,11 +162,25 @@ void bat_apply_settings(Battery *bat, float capacity_ah) {
     }
 
     soh_calc(&bat->soh_est);
+    bat->ekf.rint.soh = _clamp(bat->soh_est.soh, 0.30f, 1.0f);
     bat->soh = bat->soh_est.soh * 100.0f;
     bat->efc = bat->soh_est.efc;
+    bat->soh_rul_cycles = soh_rul_cycles(&bat->soh_est);
+    pred_init(&bat->pred, bat->soh_est.q_nominal_ah, settings_get()->pack_nominal_v);
     bat->remaining_wh = (bat->soc / 100.0f) *
                         fmaxf(bat->soh_est.q_measured_ah, 0.1f) *
                         settings_get()->pack_nominal_v;
+    bat->time_min = 9999;
+    bat->pred_confidence = 0.0f;
+    bat->_eta_discharging = false;
+    bat->_eta_pause_s = PRED_RESET_IDLE_SECONDS;
+    bat->eta_usable_wh = 0.0f;
+    bat->eta_cutoff_soc = 0.0f;
+}
+
+void bat_seed_predictor(Battery *bat, float baseline_power_w, float peukert_n) {
+    if (!bat) return;
+    pred_seed(&bat->pred, baseline_power_w, peukert_n);
 }
 
 // ── Sensor read ──────────────────────────────────────────────
@@ -282,7 +331,19 @@ void bat_update_bms(Battery *bat, float dt_s) {
         return;
     }
 
+    if (bat->voltage < VBAT_BROWNOUT_V) {
+        pred_reset_runtime(&bat->pred);
+        bat->_eta_discharging = false;
+        bat->_eta_pause_s = PRED_RESET_IDLE_SECONDS;
+        bat->eta_usable_wh = 0.0f;
+        bat->eta_cutoff_soc = _clamp(bat->soc / 100.0f, 0.0f, 1.0f);
+        bat->time_min = 0;
+        bat->pred_confidence = 0.0f;
+        return;
+    }
+
     float temp_used = tbat_ok ? bat->temp_bat : 25.0f;
+    bat->ekf.rint.soh = _clamp(bat->soh_est.soh, 0.30f, 1.0f);
     bat->ekf.q_n = fmaxf(1.0f, bat->soh_est.q_measured_ah * 3600.0f);
 
     float soc_frac = ekf_step(&bat->ekf, chg_ok ? bat->i_net : bat->i_dis, bat->voltage,
@@ -292,21 +353,32 @@ void bat_update_bms(Battery *bat, float dt_s) {
     bat->r0_mohm = bat->ekf.r0 * 1000.0f;
 
     if (bat->is_idle && tbat_ok) {
-        if (bat->_t_idle_ms == 0)
+        if (bat->_t_idle_ms == 0) {
+            bat->_v_before_idle = bat->_v_prev;
+            bat->_i_before_idle = bat->_i_prev;
             bat->_t_idle_ms = _ms_now();
+        }
         uint32_t idle_ms = _ms_now() - bat->_t_idle_ms;
         if (idle_ms >= (OCV_SETTLE_MS * 2u)) {
+            if (fabsf(bat->_i_before_idle) > 2.0f) {
+                float dv_idle = bat->voltage - bat->_v_before_idle;
+                ekf_update_r0(&bat->ekf, dv_idle, bat->_i_before_idle, temp_used);
+            }
             ekf_inject_ocv(&bat->ekf, bat->voltage, temp_used, 0.35f);
             bat->_t_idle_ms = 0;
+            bat->_v_before_idle = bat->voltage;
+            bat->_i_before_idle = 0.0f;
         }
     } else {
         bat->_t_idle_ms = 0;
+        bat->_v_before_idle = bat->voltage;
+        bat->_i_before_idle = bat->i_net;
     }
 
     float di = bat->i_net - bat->_i_prev;
     float dv = bat->voltage - bat->_v_prev;
-    if (fabsf(di) >= 3.0f && fabsf(dv) >= 0.01f && dt_s <= 0.25f)
-        ekf_update_r0(&bat->ekf, dv, di);
+    if (fabsf(di) >= 1.0f && fabsf(dv) >= 0.005f && dt_s <= 0.25f)
+        ekf_update_r0(&bat->ekf, dv, di, temp_used);
     bat->_v_prev = bat->voltage;
     bat->_i_prev = bat->i_net;
 
@@ -315,22 +387,46 @@ void bat_update_bms(Battery *bat, float dt_s) {
     else if (chg_ok && bat->i_chg > 0.1f)
         soh_update_charge(&bat->soh_est, bat->i_chg, bat->voltage, dt_s);
 
-    bool is_now_discharging = (bat->i_net > 0.5f);
+    uint32_t now_ms = _ms_now();
+    bool discharge_enter = !bat->is_charging && bat->i_net > 0.50f && bat->power_w > 5.0f;
+    bool discharge_hold = !bat->is_charging && bat->i_net > 0.40f && bat->power_w > 3.0f;
+    bool is_now_discharging = bat->_was_discharging ? discharge_hold : discharge_enter;
     if (!bat->_was_discharging && is_now_discharging) {
         bat->soh_est._soc_dis_start_frac = _clamp(bat->soc / 100.0f, 0.0f, 1.0f);
         bat->soh_est._ah_dis_session = 0.0f;
         bat->soh_est._wh_dis_session = 0.0f;
+        bat->_discharge_active_ms = now_ms;
     }
-    if (bat->_was_discharging && !is_now_discharging)
-        soh_on_cycle_end(&bat->soh_est, bat->ekf.r0, bat->soc / 100.0f);
+    if (bat->_was_discharging && !is_now_discharging) {
+        uint32_t dur_ms = (bat->_discharge_active_ms > 0u && now_ms > bat->_discharge_active_ms)
+                        ? (now_ms - bat->_discharge_active_ms)
+                        : 0u;
+        if (dur_ms >= 30000u) {
+            float t_k = temp_used + 273.15f;
+            float t_ref_k = EKF_T_REF + 273.15f;
+            float factor = expf(EKF_KR * (1.0f / t_k - 1.0f / t_ref_k));
+            float r0_soh = bat->ekf.r0;
+            if (_finitef(factor) && factor > 0.2f && factor < 5.0f) {
+                r0_soh /= factor;
+            }
+            soh_on_cycle_end(&bat->soh_est, r0_soh, bat->soc / 100.0f);
+        }
+        bat->_discharge_active_ms = 0u;
+    }
     bat->_was_discharging = is_now_discharging;
 
     bat->soh = bat->soh_est.soh * 100.0f;
     bat->efc = bat->soh_est.efc;
+    bat->soh_rul_cycles = soh_rul_cycles(&bat->soh_est);
     float usable_ah = fmaxf(bat->soh_est.q_measured_ah, 0.1f);
     bat->remaining_wh = soc_frac * usable_ah * cfg->pack_nominal_v;
 
     if (bat->is_charging && chg_ok) {
+        pred_reset_runtime(&bat->pred);
+        bat->_eta_discharging = false;
+        bat->_eta_pause_s = PRED_RESET_IDLE_SECONDS;
+        bat->eta_usable_wh = 0.0f;
+        bat->eta_cutoff_soc = _clamp(soc_frac, 0.0f, 1.0f);
         float net_charge_a = fmaxf(-bat->i_net, 0.0f);
         float remain_ah = fmaxf((1.0f - soc_frac) * usable_ah, 0.0f);
         bat->pred_confidence = 0.0f;
@@ -341,14 +437,68 @@ void bat_update_bms(Battery *bat, float dt_s) {
             bat->time_min = 9999;
         }
     } else {
-        bat->pred_confidence = 0.0f;
-        bat->time_min = 9999;
+        bool discharge_enter = !bat->is_charging && bat->i_net > 0.50f && bat->power_w > 5.0f;
+        bool discharge_hold  = !bat->is_charging && bat->i_net > 0.40f && bat->power_w > 3.0f;
+        bool discharge_eta_active = bat->_eta_discharging ? discharge_hold : discharge_enter;
+
+        if (discharge_eta_active) {
+            if (!bat->_eta_discharging && bat->_eta_pause_s >= PRED_RESET_IDLE_SECONDS) {
+                pred_reset_runtime(&bat->pred);
+            }
+            bat->_eta_discharging = true;
+            bat->_eta_pause_s = 0.0f;
+
+            float usable_energy_wh = _eta_usable_energy_wh(bat,
+                                                           soc_frac,
+                                                           usable_ah,
+                                                           fmaxf(bat->i_net, 0.0f),
+                                                           temp_used);
+            int pred_min = pred_update(&bat->pred,
+                                       soc_frac,
+                                       bat->i_net,
+                                       bat->power_w,
+                                       usable_energy_wh,
+                                       temp_used,
+                                       bat->soh_est.soh,
+                                       bat->ekf.r0,
+                                       dt_s);
+            bat->pred_confidence = bat->pred.confidence;
+            bat->time_min = (pred_min > 0 && pred_min < 9999) ? pred_min : 9999;
+
+            if ((now_ms - bat->_eta_log_ms) >= 10000u) {
+                bat->_eta_log_ms = now_ms;
+                printf("[ETA] P=%.1fW fast=%.1f slow=%.1f win=%.1f cons=%.1f usable=%.1fWh cutSOC=%.1f%% raw=%dm disp=%dm conf=%.2f R0=%.1fmOhm\n",
+                       bat->power_w,
+                       bat->pred.power_fast_w,
+                       bat->pred.power_slow_w,
+                       bat->pred.power_window_w,
+                       bat->pred.power_cons_w,
+                       bat->eta_usable_wh,
+                       bat->eta_cutoff_soc * 100.0f,
+                       bat->pred.minutes_raw,
+                       bat->pred.minutes_display,
+                       bat->pred.confidence,
+                       bat->ekf.r0 * 1000.0f);
+            }
+        } else {
+            bat->_eta_discharging = false;
+            bat->_eta_pause_s += dt_s;
+            bat->eta_usable_wh = 0.0f;
+            bat->eta_cutoff_soc = _clamp(soc_frac, 0.0f, 1.0f);
+            if (bat->_eta_pause_s >= PRED_RESET_IDLE_SECONDS) {
+                pred_reset_runtime(&bat->pred);
+            }
+            bat->pred_confidence = 0.0f;
+            bat->time_min = 9999;
+        }
     }
 }
 
-void bat_save(Battery *bat) {
+bool bat_save(Battery *bat) {
+    if (!bat) return false;
     soh_calc(&bat->soh_est);
-    soh_save(&bat->soh_est);
+    bat->ekf.rint.soh = _clamp(bat->soh_est.soh, 0.30f, 1.0f);
+    return soh_save(&bat->soh_est);
 }
 
 // ── P0.1: Real emergency off ──────────────────────────────────
@@ -383,6 +533,7 @@ void bat_snapshot(const Battery *bat, BatSnapshot *out) {
     out->is_charging = bat->is_charging;
     out->is_idle     = bat->is_idle;
     out->time_min    = bat->time_min;
+    out->soh_rul_cycles = bat->soh_rul_cycles;
     out->pred_confidence = bat->pred_confidence;
     out->temp_bat_status = (uint8_t)bat->temp_bat_status;
     out->temp_inv_status = (uint8_t)bat->temp_inv_status;

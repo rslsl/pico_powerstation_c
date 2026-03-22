@@ -28,6 +28,51 @@ static inline float _clampf(float v, float lo, float hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+static inline bool _finitef(float v) {
+    return !isnan(v) && !isinf(v);
+}
+
+static const char *_stats_invalid_reason(const StatsFlash *f) {
+    if (!f) return "null";
+    if (f->version != STATS_VERSION) return "version";
+    if (!_finitef(f->efc_total) || f->efc_total < 0.0f || f->efc_total > 50000.0f) return "efc";
+    if (!_finitef(f->energy_in_wh) || f->energy_in_wh < 0.0f || f->energy_in_wh > 1.0e7f) return "energy_in";
+    if (!_finitef(f->energy_out_wh) || f->energy_out_wh < 0.0f || f->energy_out_wh > 1.0e7f) return "energy_out";
+    if (!_finitef(f->runtime_h) || f->runtime_h < 0.0f || f->runtime_h > 100000.0f) return "runtime";
+    if (f->temp_samples == 0u) {
+        if (!_finitef(f->temp_min_c) || !_finitef(f->temp_max_c)) return "temp_init";
+    } else {
+        if (!_finitef(f->temp_min_c) || !_finitef(f->temp_max_c) ||
+            !_finitef(f->temp_acc_c) ||
+            f->temp_min_c < (SENSOR_SANITY_TEMP_MIN_C - 10.0f) ||
+            f->temp_max_c > (SENSOR_SANITY_TEMP_MAX_C + 10.0f) ||
+            f->temp_min_c > f->temp_max_c) {
+            return "temp_range";
+        }
+    }
+    if (!_finitef(f->peak_current_a) || f->peak_current_a < 0.0f || f->peak_current_a > (IMAX_DIS_A * 2.0f))
+        return "peak_current";
+    if (!_finitef(f->peak_power_w) || f->peak_power_w < 0.0f || f->peak_power_w > 5000.0f)
+        return "peak_power";
+    if (!_finitef(f->soh_initial) || f->soh_initial < 0.0f || f->soh_initial > 100.0f)
+        return "soh_initial";
+    if (!_finitef(f->soh_last) || f->soh_last < 0.0f || f->soh_last > 100.0f)
+        return "soh_last";
+    if (!_finitef(f->session_energy_out_wh) || f->session_energy_out_wh < 0.0f || f->session_energy_out_wh > f->energy_out_wh)
+        return "session_out";
+    if (!_finitef(f->session_energy_in_wh) || f->session_energy_in_wh < 0.0f || f->session_energy_in_wh > f->energy_in_wh)
+        return "session_in";
+    if (!_finitef(f->session_peak_a) || f->session_peak_a < 0.0f || f->session_peak_a > fmaxf(f->peak_current_a, IMAX_DIS_A * 2.0f))
+        return "session_peak";
+    if (!_finitef(f->avg_discharge_wh_per_h) || f->avg_discharge_wh_per_h < 0.0f || f->avg_discharge_wh_per_h > 5000.0f)
+        return "avg_power";
+    if (!_finitef(f->avg_discharge_duration_h) || f->avg_discharge_duration_h < 0.0f || f->avg_discharge_duration_h > 48.0f)
+        return "avg_duration";
+    if (!_finitef(f->peukert_calibrated) || f->peukert_calibrated < 1.0f || f->peukert_calibrated > 1.20f)
+        return "peukert";
+    return NULL;
+}
+
 static void _stats_reset_payload(BmsStats *s, uint32_t boot_count, float soh_seed) {
     memset(&s->flash, 0, sizeof(s->flash));
     s->flash.version = STATS_VERSION;
@@ -147,8 +192,8 @@ void stats_update(BmsStats *s,
     s->dirty = true;
 }
 
-void stats_save(BmsStats *s) {
-    if (!s->initialized || !s->dirty) return;
+bool stats_save(BmsStats *s) {
+    if (!s || !s->initialized || !s->dirty) return false;
 
     StatsFlash *f = &s->flash;
 
@@ -160,14 +205,25 @@ void stats_save(BmsStats *s) {
     f->session_energy_in_wh  = s->session_wh_in;
     f->session_peak_a        = s->session_peak_a;
 
+    const char *invalid = _stats_invalid_reason(f);
+    if (invalid) {
+        printf("[STATS] save skipped: invalid %s EFC=%.1f SOH=%.1f%% in=%.0fWh out=%.0fWh\n",
+               invalid, f->efc_total, f->soh_last, f->energy_in_wh, f->energy_out_wh);
+        return false;
+    }
+
     bool ok = nvm_ab_save(STATS_OFF_A, STATS_OFF_B,
                           STATS_MAGIC,
                           &s->_nvm_seq, &s->_nvm_slot,
                           f, sizeof(*f));
-    if (!ok) printf("[STATS] save FAILED\n");
-    else printf("[STATS] saved: boots=%lu EFC=%.1f SOH=%.1f%%\n",
-                (unsigned long)f->boot_count, f->efc_total, f->soh_last);
+    if (!ok) {
+        printf("[STATS] save FAILED\n");
+        return false;
+    }
+    printf("[STATS] saved: boots=%lu EFC=%.1f SOH=%.1f%%\n",
+           (unsigned long)f->boot_count, f->efc_total, f->soh_last);
     s->dirty = false;
+    return true;
 }
 
 void stats_reset(BmsStats *s) {
