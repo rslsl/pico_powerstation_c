@@ -26,6 +26,12 @@ static void _init_arc_lut(void) {
 }
 
 static void _arc_lut_sample(float deg, float *ca, float *sa) {
+    if (!ca || !sa) return;
+    if (!isfinite(deg)) {
+        *ca = 1.0f;
+        *sa = 0.0f;
+        return;
+    }
     while (deg < 0.0f) deg += 360.0f;
     while (deg >= 360.0f) deg -= 360.0f;
     int idx0 = (int)deg;
@@ -327,11 +333,12 @@ void disp_text_center_safe(Display *d, int y, const char *s, uint16_t col) {
 void disp_bar(Display *d, int x, int y, int w, int h,
               float val, float mx, uint16_t col) {
     disp_rect(d, x, y, w, h, D_GRAY);
-    if (mx <= 0.0f) return;
-    int filled = (int)(w * (val / mx));
+    if (w <= 2 || h <= 2) return;
+    if (!isfinite(val) || !isfinite(mx) || mx <= 0.0f) return;
+    int filled = (int)(((float)(w - 2) * (val / mx)) + 0.5f);
     if (filled < 0) filled = 0;
-    if (filled > w) filled = w;
-    if (filled > 0) disp_fill_rect(d, x+1, y+1, filled-2, h-2, col);
+    if (filled > (w - 2)) filled = (w - 2);
+    if (filled > 0) disp_fill_rect(d, x + 1, y + 1, filled, h - 2, col);
 }
 
 void disp_ring(Display *d, int cx, int cy, int r, int thick,

@@ -62,7 +62,7 @@ typedef struct {
 
 void  soh_init(BmsSoh *s, float q_nominal_ah, float r0_nominal_ohm);
 void  soh_load(BmsSoh *s);
-bool  soh_save(const BmsSoh *s);
+bool  soh_save(BmsSoh *s);
 
 void  soh_update_discharge(BmsSoh *s, float i_a, float v, float dt_s);
 void  soh_update_charge   (BmsSoh *s, float i_a, float v, float dt_s);

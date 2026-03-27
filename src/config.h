@@ -1,6 +1,6 @@
 #pragma once
 // ============================================================
-// config.h - PowerStation 3S2P / RP2040 / 16MB flash build
+// config.h - PowerStation 3S2P / RP2040
 // ============================================================
 
 #include <stdbool.h>
@@ -163,7 +163,9 @@
 #define FLASH_HIST_OFFSET_B   (FLASH_TOTAL - 4 * FLASH_SECTOR_SIZE)
 #define FLASH_SETTINGS_OFFSET (FLASH_TOTAL - 5 * FLASH_SECTOR_SIZE)
 #define FLASH_SETTINGS_OFFSET_B (FLASH_TOTAL - 6 * FLASH_SECTOR_SIZE)
-#define FLASH_LOG_OFFSET      (FLASH_TOTAL - 69 * FLASH_SECTOR_SIZE)
+#define FLASH_RELAY_OFFSET    (FLASH_TOTAL - 7 * FLASH_SECTOR_SIZE)
+#define FLASH_RELAY_OFFSET_B  (FLASH_TOTAL - 8 * FLASH_SECTOR_SIZE)
+#define FLASH_LOG_OFFSET      (FLASH_TOTAL - 72 * FLASH_SECTOR_SIZE)
 #define FLASH_LOG_SECTORS     64
 #define FLASH_LOG_SIZE        (FLASH_LOG_SECTORS * FLASH_SECTOR_SIZE)
 
@@ -175,8 +177,11 @@ CFG_STATIC_ASSERT((FLASH_HIST_OFFSET % FLASH_SECTOR_SIZE) == 0, "Stats slot A mu
 CFG_STATIC_ASSERT((FLASH_HIST_OFFSET_B % FLASH_SECTOR_SIZE) == 0, "Stats slot B must be sector-aligned");
 CFG_STATIC_ASSERT((FLASH_SETTINGS_OFFSET % FLASH_SECTOR_SIZE) == 0, "Settings slot must be sector-aligned");
 CFG_STATIC_ASSERT((FLASH_SETTINGS_OFFSET_B % FLASH_SECTOR_SIZE) == 0, "Settings slot B must be sector-aligned");
+CFG_STATIC_ASSERT((FLASH_RELAY_OFFSET % FLASH_SECTOR_SIZE) == 0, "Relay slot A must be sector-aligned");
+CFG_STATIC_ASSERT((FLASH_RELAY_OFFSET_B % FLASH_SECTOR_SIZE) == 0, "Relay slot B must be sector-aligned");
 CFG_STATIC_ASSERT((FLASH_LOG_OFFSET % FLASH_SECTOR_SIZE) == 0, "Log region must be sector-aligned");
-CFG_STATIC_ASSERT((FLASH_LOG_OFFSET + FLASH_LOG_SIZE) <= FLASH_TOTAL, "Log region must fit inside 16MB flash");
+CFG_STATIC_ASSERT((FLASH_LOG_OFFSET + FLASH_LOG_SIZE) <= FLASH_RELAY_OFFSET_B,
+                  "Log region must not overlap settings/relay sectors");
 
 // ST7789 colors: canonical definitions are D_* in app/display.h.
 // COL_* removed — they were unused and had different values from D_*,
@@ -184,6 +189,7 @@ CFG_STATIC_ASSERT((FLASH_LOG_OFFSET + FLASH_LOG_SIZE) <= FLASH_TOTAL, "Log regio
 
 // UI animation / screensaver
 #define UI_IDLE_SCREENSAVER_MS  15000
+#define UI_IDLE_DISCHARGE_SAVER_MS 60000
 #define UI_ANIM_STEP_MS         100
 #define UI_BLINK_STEP_MS        450
 #define UI_REFRESH_MS           500
@@ -192,7 +198,7 @@ CFG_STATIC_ASSERT((FLASH_LOG_OFFSET + FLASH_LOG_SIZE) <= FLASH_TOTAL, "Log regio
 
 // Firmware version
 #ifndef FW_VERSION
-#define FW_VERSION  "v1.2.0"
+#define FW_VERSION  "v1.3.0"
 #endif
 
 // USB bring-up mode:

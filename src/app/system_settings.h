@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define SETTINGS_MAGIC   0x53595453u
-#define SETTINGS_VERSION 2u
+#define SETTINGS_VERSION 3u
 
 typedef struct __attribute__((packed)) {
     uint16_t version;
@@ -46,7 +46,8 @@ typedef struct __attribute__((packed)) {
 
     uint8_t ui_brightness;
     uint8_t buzzer_en;
-    uint8_t _pad[2];
+    uint8_t buzzer_preset;
+    uint8_t _pad;
 } SystemSettings;
 
 _Static_assert(sizeof(SystemSettings) <= 4080, "SystemSettings payload too large");

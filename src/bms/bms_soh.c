@@ -165,7 +165,7 @@ void soh_load(BmsSoh *s) {
     printf("[SOH] no valid data, defaults\n");
 }
 
-bool soh_save(const BmsSoh *s) {
+bool soh_save(BmsSoh *s) {
     const char *invalid = _soh_invalid_reason(s);
     if (invalid) {
         printf("[SOH] save skipped: invalid %s soh=%.1f%% q=%.2fAh r0=%.1fmOhm efc=%.1f\n",
@@ -193,19 +193,18 @@ bool soh_save(const BmsSoh *s) {
     f.chg_ah_total = s->chg_ah_total;
     f.r0_update_count = s->r0_update_count;
 
-    BmsSoh *sm = (BmsSoh *)(uintptr_t)s;
     bool ok = nvm_ab_save(SOH_OFF_A, SOH_OFF_B,
                           SOH_MAGIC,
-                          &sm->_nvm_seq, &sm->_nvm_slot,
+                          &s->_nvm_seq, &s->_nvm_slot,
                           &f, sizeof(f));
     if (!ok) {
         printf("[SOH] save FAILED\n");
         return false;
     } else {
-        sm->migration_pending = false;
+        s->migration_pending = false;
         printf("[SOH] saved: efc=%.1f soh=%.1f%% slot=%d seq=%lu\n",
                s->efc, s->soh * 100.0f,
-               sm->_nvm_slot, (unsigned long)sm->_nvm_seq);
+               s->_nvm_slot, (unsigned long)s->_nvm_seq);
         return true;
     }
 }
@@ -220,7 +219,9 @@ void soh_update_discharge(BmsSoh *s, float i_a, float v, float dt_s) {
     s->dis_ah_total += dah;
     s->dis_wh_total += dwh;
     s->wh_total = s->dis_wh_total;
-    s->efc += dah / s->q_nominal_ah;
+    if (_finitef(s->q_nominal_ah) && s->q_nominal_ah >= 0.1f) {
+        s->efc += dah / s->q_nominal_ah;
+    }
 }
 
 void soh_update_charge(BmsSoh *s, float i_a, float v, float dt_s) {
@@ -272,6 +273,17 @@ void soh_on_cycle_end(BmsSoh *s, float r0_current, float soc_end_frac) {
 }
 
 void soh_calc(BmsSoh *s) {
+    if (!s) return;
+    if (!_finitef(s->q_nominal_ah) || s->q_nominal_ah < 0.1f) {
+        s->soh_q = 1.0f;
+        s->soh_r = 1.0f;
+        s->soh = 1.0f;
+        s->soh_q_confidence = 0.0f;
+        s->soh_r_confidence = 0.0f;
+        s->soh_confidence = 0.0f;
+        return;
+    }
+
     float raw_soh_q = _clampf(s->q_measured_ah / s->q_nominal_ah, 0.01f, 1.0f);
 
     float raw_soh_r = 1.0f;

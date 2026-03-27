@@ -1,4 +1,5 @@
 #include "system_settings.h"
+#include "buzzer.h"
 
 #include "../bms/flash_nvm.h"
 #include "../config.h"
@@ -10,6 +11,7 @@ static SystemSettings g_settings;
 static uint32_t g_settings_seq = 0;
 static uint8_t g_settings_slot = 0;
 static bool g_settings_ready = false;
+static const uint8_t SETTINGS_FIXED_BRIGHTNESS_PCT = 100u;
 
 typedef struct __attribute__((packed)) {
     uint16_t version;
@@ -41,6 +43,49 @@ typedef struct __attribute__((packed)) {
     uint8_t _pad[2];
 } SystemSettingsV1;
 
+typedef struct __attribute__((packed)) {
+    uint16_t version;
+
+    float capacity_ah;
+    float pack_full_v;
+    float pack_empty_v;
+    float pack_nominal_v;
+
+    float cell_warn_v;
+    float cell_cut_v;
+    float vbat_warn_v;
+    float vbat_cut_v;
+
+    float temp_bat_warn_c;
+    float temp_bat_buzz_c;
+    float temp_bat_safe_c;
+    float temp_bat_cut_c;
+    float temp_bat_charge_min_c;
+    float temp_inv_warn_c;
+    float temp_inv_safe_c;
+    float temp_inv_cut_c;
+
+    float shunt_dis_mohm;
+    float shunt_chg_mohm;
+    float pack_dis_v_gain;
+    float pack_chg_v_gain;
+    float cell1_v_gain;
+    float cell2_v_gain;
+    float cell3_v_gain;
+
+    float cal_ref_dis_current_a;
+    float cal_ref_dis_voltage_v;
+    float cal_ref_chg_current_a;
+    float cal_ref_chg_voltage_v;
+    float cal_ref_cell1_v;
+    float cal_ref_cell2_v;
+    float cal_ref_cell3_v;
+
+    uint8_t ui_brightness;
+    uint8_t buzzer_en;
+    uint8_t _pad[2];
+} SystemSettingsV2;
+
 static float _clampf(float v, float lo, float hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
@@ -70,8 +115,45 @@ static void _settings_from_v1(SystemSettings *dst, const SystemSettingsV1 *src) 
     dst->temp_inv_cut_c         = src->temp_inv_cut_c;
     dst->shunt_dis_mohm         = src->shunt_dis_mohm;
     dst->shunt_chg_mohm         = src->shunt_chg_mohm;
-    dst->ui_brightness          = src->ui_brightness;
     dst->buzzer_en              = src->buzzer_en;
+    dst->buzzer_preset          = src->buzzer_en ? BUZ_PRESET_FULL : BUZ_PRESET_SILENT;
+}
+
+static void _settings_from_v2(SystemSettings *dst, const SystemSettingsV2 *src) {
+    settings_defaults(dst);
+
+    dst->capacity_ah            = src->capacity_ah;
+    dst->pack_full_v            = src->pack_full_v;
+    dst->pack_empty_v           = src->pack_empty_v;
+    dst->pack_nominal_v         = src->pack_nominal_v;
+    dst->cell_warn_v            = src->cell_warn_v;
+    dst->cell_cut_v             = src->cell_cut_v;
+    dst->vbat_warn_v            = src->vbat_warn_v;
+    dst->vbat_cut_v             = src->vbat_cut_v;
+    dst->temp_bat_warn_c        = src->temp_bat_warn_c;
+    dst->temp_bat_buzz_c        = src->temp_bat_buzz_c;
+    dst->temp_bat_safe_c        = src->temp_bat_safe_c;
+    dst->temp_bat_cut_c         = src->temp_bat_cut_c;
+    dst->temp_bat_charge_min_c  = src->temp_bat_charge_min_c;
+    dst->temp_inv_warn_c        = src->temp_inv_warn_c;
+    dst->temp_inv_safe_c        = src->temp_inv_safe_c;
+    dst->temp_inv_cut_c         = src->temp_inv_cut_c;
+    dst->shunt_dis_mohm         = src->shunt_dis_mohm;
+    dst->shunt_chg_mohm         = src->shunt_chg_mohm;
+    dst->pack_dis_v_gain        = src->pack_dis_v_gain;
+    dst->pack_chg_v_gain        = src->pack_chg_v_gain;
+    dst->cell1_v_gain           = src->cell1_v_gain;
+    dst->cell2_v_gain           = src->cell2_v_gain;
+    dst->cell3_v_gain           = src->cell3_v_gain;
+    dst->cal_ref_dis_current_a  = src->cal_ref_dis_current_a;
+    dst->cal_ref_dis_voltage_v  = src->cal_ref_dis_voltage_v;
+    dst->cal_ref_chg_current_a  = src->cal_ref_chg_current_a;
+    dst->cal_ref_chg_voltage_v  = src->cal_ref_chg_voltage_v;
+    dst->cal_ref_cell1_v        = src->cal_ref_cell1_v;
+    dst->cal_ref_cell2_v        = src->cal_ref_cell2_v;
+    dst->cal_ref_cell3_v        = src->cal_ref_cell3_v;
+    dst->buzzer_en              = src->buzzer_en;
+    dst->buzzer_preset          = src->buzzer_en ? BUZ_PRESET_FULL : BUZ_PRESET_SILENT;
 }
 
 void settings_defaults(SystemSettings *out) {
@@ -113,8 +195,9 @@ void settings_defaults(SystemSettings *out) {
     out->cal_ref_cell2_v = 0.0f;
     out->cal_ref_cell3_v = 0.0f;
 
-    out->ui_brightness = UI_BL_ACTIVE_PCT;
+    out->ui_brightness = SETTINGS_FIXED_BRIGHTNESS_PCT;
     out->buzzer_en = 1u;
+    out->buzzer_preset = BUZ_PRESET_FULL;
 }
 
 static void _settings_sanitize(SystemSettings *s) {
@@ -220,8 +303,16 @@ static void _settings_sanitize(SystemSettings *s) {
     s->cal_ref_cell2_v = _clampf(s->cal_ref_cell2_v, 0.0f, 5.0f);
     s->cal_ref_cell3_v = _clampf(s->cal_ref_cell3_v, 0.0f, 5.0f);
 
-    s->ui_brightness = (uint8_t)_clampf((float)s->ui_brightness, 10.0f, 100.0f);
+    // Backlight is tied to 3V3 on current hardware, so keep this compatibility
+    // field fixed and non-user-configurable.
+    s->ui_brightness = SETTINGS_FIXED_BRIGHTNESS_PCT;
+    if (s->buzzer_preset >= BUZ_PRESET_COUNT) s->buzzer_preset = def.buzzer_preset;
     s->buzzer_en = s->buzzer_en ? 1u : 0u;
+    if (!s->buzzer_en) {
+        s->buzzer_preset = BUZ_PRESET_SILENT;
+    } else if (s->buzzer_preset == BUZ_PRESET_SILENT) {
+        s->buzzer_en = 0u;
+    }
 }
 
 void settings_init(void) {
@@ -230,7 +321,8 @@ void settings_init(void) {
     uint32_t seq = 0;
     uint8_t slot = 0;
     bool loaded_ok = false;
-    bool migrated_v1 = false;
+    bool persist_after_load = false;
+    const char *load_tag = "loaded";
 
     if (nvm_ab_load(FLASH_SETTINGS_OFFSET, FLASH_SETTINGS_OFFSET_B,
                     SETTINGS_MAGIC,
@@ -238,14 +330,28 @@ void settings_init(void) {
                     &seq, &slot) &&
         loaded.version == SETTINGS_VERSION) {
         loaded_ok = true;
-    } else if (nvm_ab_load(FLASH_SETTINGS_OFFSET, FLASH_SETTINGS_OFFSET_B,
-                           SETTINGS_MAGIC,
-                           &legacy, sizeof(legacy),
-                           &seq, &slot) &&
-               legacy.version == 1u) {
-        _settings_from_v1(&loaded, &legacy);
-        loaded_ok = true;
-        migrated_v1 = true;
+    } else {
+        SystemSettingsV2 legacy_v2;
+
+        if (nvm_ab_load(FLASH_SETTINGS_OFFSET, FLASH_SETTINGS_OFFSET_B,
+                        SETTINGS_MAGIC,
+                        &legacy_v2, sizeof(legacy_v2),
+                        &seq, &slot) &&
+            legacy_v2.version == 2u) {
+            _settings_from_v2(&loaded, &legacy_v2);
+            loaded_ok = true;
+            persist_after_load = true;
+            load_tag = "migrated v2";
+        } else if (nvm_ab_load(FLASH_SETTINGS_OFFSET, FLASH_SETTINGS_OFFSET_B,
+                               SETTINGS_MAGIC,
+                               &legacy, sizeof(legacy),
+                               &seq, &slot) &&
+                   legacy.version == 1u) {
+            _settings_from_v1(&loaded, &legacy);
+            loaded_ok = true;
+            persist_after_load = true;
+            load_tag = "migrated v1";
+        }
     }
 
     if (loaded_ok) {
@@ -253,11 +359,11 @@ void settings_init(void) {
         g_settings = loaded;
         g_settings_seq = seq;
         g_settings_slot = slot;
-        printf("[SET] %s: cap=%.1fAh chg_shunt=%.3fmOhm dis_gain=%.4f\n",
-               migrated_v1 ? "migrated v1" : "loaded",
+        printf("[SET] %s: cap=%.1fAh chg_shunt=%.3fmOhm sound=%s\n",
+               load_tag,
                g_settings.capacity_ah,
                g_settings.shunt_chg_mohm,
-               g_settings.pack_dis_v_gain);
+               buz_preset_name((BuzzerPreset)g_settings.buzzer_preset));
     } else {
         settings_defaults(&g_settings);
         g_settings_seq = 0;
@@ -265,6 +371,13 @@ void settings_init(void) {
         printf("[SET] defaults\n");
     }
     g_settings_ready = true;
+    if (loaded_ok && persist_after_load) {
+        if (settings_store(&g_settings)) {
+            printf("[SET] migration persisted as v%u\n", (unsigned)SETTINGS_VERSION);
+        } else {
+            printf("[SET] migration persist FAILED\n");
+        }
+    }
 }
 
 void settings_copy(SystemSettings *out) {
@@ -295,11 +408,11 @@ bool settings_store(const SystemSettings *next) {
 
     g_settings = copy;
     g_settings_ready = true;
-    printf("[SET] saved: cap=%.1fAh cut=%.2fV/%.2fV chg_shunt=%.3f\n",
+    printf("[SET] saved: cap=%.1fAh cut=%.2fV/%.2fV sound=%s\n",
            g_settings.capacity_ah,
            g_settings.vbat_cut_v,
            g_settings.cell_cut_v,
-           g_settings.shunt_chg_mohm);
+           buz_preset_name((BuzzerPreset)g_settings.buzzer_preset));
     return true;
 }
 

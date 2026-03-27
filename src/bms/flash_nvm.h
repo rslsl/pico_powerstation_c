@@ -24,6 +24,13 @@ void     nvm_read (uint32_t flash_offset, void *dst, size_t len);
 // Uses multicore lockout + irq disable internally.
 void nvm_write_sector(uint32_t flash_offset, const uint8_t *src);
 
+// Erase one full 4096-byte sector.
+void nvm_erase_sector(uint32_t flash_offset);
+
+// Program one full flash page (256 bytes) without erasing the sector first.
+// The destination page must already be erased or only transition bits 1->0.
+void nvm_program_page(uint32_t flash_offset, const uint8_t *src);
+
 // Read-modify-write: patch `len` bytes at `offset` inside its sector.
 // Reads current sector, applies patch, writes back.
 void nvm_patch(uint32_t flash_offset, const void *src, size_t len);

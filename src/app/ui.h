@@ -85,8 +85,10 @@ typedef struct {
         uint8_t soc_pct;
         uint8_t temp_bat;
         float voltage;
+        float current;
+        float param;
         uint32_t alarm_flags;
-    } log_cache[9];
+    } log_cache[8];
     uint8_t log_cache_n;
 
     uint8_t scan_found[8][16];
@@ -105,7 +107,7 @@ typedef struct {
 
     UiState state;
     int8_t cur[S_COUNT];
-    int8_t ev_scroll;
+    int16_t ev_scroll;
     int8_t hist_page;
     float soc_anim;
     bool blink;
@@ -140,7 +142,7 @@ typedef struct {
     bool btn_prev[3];
 
     int8_t cur[S_COUNT];
-    int8_t ev_scroll;
+    int16_t ev_scroll;
     int8_t hist_page;
 
     char toast_msg[48];

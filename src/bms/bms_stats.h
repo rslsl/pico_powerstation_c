@@ -55,6 +55,7 @@ _Static_assert(sizeof(StatsFlash) <= 4096 - 16,
 
 typedef struct {
     StatsFlash flash;
+    float  runtime_at_boot_h;
 
     // P1.6: running session accumulators (not yet in flash)
     float  session_wh_out;

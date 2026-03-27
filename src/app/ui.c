@@ -79,6 +79,13 @@ static float _clampf_local(float v, float lo, float hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+static BuzzerPreset _step_buzzer_preset(BuzzerPreset preset, int dir) {
+    int next = (int)preset + ((dir > 0) ? 1 : -1);
+    if (next < 0) next = BUZ_PRESET_COUNT - 1;
+    if (next >= BUZ_PRESET_COUNT) next = 0;
+    return (BuzzerPreset)next;
+}
+
 static CalSensor _clampf_cal_sensor(uint8_t sensor) {
     return (sensor < CAL_SENSOR_COUNT) ? (CalSensor)sensor : CAL_SENSOR_DISCHARGE;
 }
@@ -364,7 +371,7 @@ static void _cal_prepare(UI *ui, CalTarget target) {
 static int _menu_len(const UI *ui, UiState s) {
     switch (s) {
         case S_PORTS:    return PORT_MENU_COUNT + 1;
-        case S_UI_CFG:   return 7;
+        case S_UI_CFG:   return 6;
         case S_BAT_CFG:  return 5;
         case S_TEMP_CFG: return 8;
         case S_CAL_CFG:  return CAL_SENSOR_COUNT;
@@ -384,11 +391,11 @@ static bool _settings_apply(UI *ui, SystemSettings *cfg, bool reconfigure_sensor
     }
 
     saved = settings_get();
-    ui->brightness = saved->ui_brightness;
-    ui->buzzer_en = saved->buzzer_en != 0;
-    if (ui->buz) buz_set_enabled(ui->buz, ui->buzzer_en);
-    if (!ui->screensaver_active) {
-        st7789_set_brightness(ui->disp, ui->brightness);
+    ui->brightness = 100u;
+    ui->buzzer_en = saved->buzzer_preset != BUZ_PRESET_SILENT;
+    if (ui->buz) {
+        buz_set_preset(ui->buz, (BuzzerPreset)saved->buzzer_preset);
+        buz_set_enabled(ui->buz, saved->buzzer_en != 0);
     }
     if (ui->apply_settings) {
         ui->apply_settings(reconfigure_sensors);
@@ -407,10 +414,9 @@ static bool _adjust_setting(UI *ui, int dir) {
     switch (ui->state) {
         case S_UI_CFG:
             if (sel == 0) {
-                int b = (int)cfg.ui_brightness + (dir > 0 ? 10 : -10);
-                if (b < 10) b = 10;
-                if (b > 100) b = 100;
-                cfg.ui_brightness = (uint8_t)b;
+                cfg.buzzer_preset = (uint8_t)_step_buzzer_preset(
+                    (BuzzerPreset)cfg.buzzer_preset, dir);
+                cfg.buzzer_en = (cfg.buzzer_preset != BUZ_PRESET_SILENT) ? 1u : 0u;
                 return _settings_apply(ui, &cfg, false, NULL);
             }
             return false;
@@ -470,7 +476,7 @@ static void _confirm_apply(UI *ui) {
 
     if ((UiConfirmAction)ui->confirm_kind == UI_CONFIRM_TOGGLE_PORT &&
         ui->confirm_arg >= 0 && ui->confirm_arg < PORT_MENU_COUNT) {
-        pwr_toggle(ui->pwr, _PORT_MENU_IDS[ui->confirm_arg]);
+        pwr_user_toggle(ui->pwr, _PORT_MENU_IDS[ui->confirm_arg]);
         ui_toast(ui, _port_menu_label(ui->confirm_arg));
     } else if ((UiConfirmAction)ui->confirm_kind == UI_CONFIRM_RESET_LATCH) {
         uint32_t resettable = ui->prot ? prot_resettable_latch_bits(ui->prot, ui->prot->latched) : 0;
@@ -570,6 +576,39 @@ static void _confirm_apply(UI *ui) {
 // Called by Core0. Reads ALL data needed by Core1 and copies it
 // into rs under render_lock. Core1 then copies rs atomically.
 static void _rs_publish(UI *ui) {
+    struct {
+        uint32_t timestamp_s;
+        uint8_t type;
+        uint8_t soc_pct;
+        uint8_t temp_bat;
+        float voltage;
+        float current;
+        float param;
+        uint32_t alarm_flags;
+    } log_cache_local[8] = {0};
+    uint32_t log_total_local = ui->logger ? log_count(ui->logger) : 0u;
+    uint8_t log_cache_n_local = 0u;
+
+    if (ui->logger && ui->state == S_EVENTS) {
+        int scroll = ui->ev_scroll;
+        if (scroll < 0) scroll = 0;
+        for (int i = 0; i < 8; i++) {
+            int idx = (int)log_total_local - 1 - scroll - i;
+            LogEvent ev;
+            if (idx < 0) break;
+            if (!log_read(ui->logger, (uint32_t)idx, &ev)) break;
+            log_cache_local[i].timestamp_s = ev.timestamp_s;
+            log_cache_local[i].type        = ev.type;
+            log_cache_local[i].soc_pct     = ev.soc_pct;
+            log_cache_local[i].temp_bat    = ev.temp_bat;
+            log_cache_local[i].voltage     = ev.voltage;
+            log_cache_local[i].current     = ev.current;
+            log_cache_local[i].param       = ev.param;
+            log_cache_local[i].alarm_flags = ev.alarm_flags;
+            log_cache_n_local++;
+        }
+    }
+
     uint32_t save = spin_lock_blocking(ui->render_lock);
     FullUiSnapshot *rs = &ui->rs;
 
@@ -613,25 +652,9 @@ static void _rs_publish(UI *ui) {
 
     // ── Log cache (P1.7) ─────────────────────────────────────
     // Pre-fetch last 9 log entries so Core1 never touches g_logger.
-    if (ui->logger) {
-        uint32_t total = log_count(ui->logger);
-        rs->log_total    = total;
-        rs->log_cache_n  = 0;
-        int scroll = ui->ev_scroll;
-        for (int i = 0; i < 9; i++) {
-            int idx = (int)total - 1 - scroll - i;
-            if (idx < 0) break;
-            LogEvent ev;
-            if (!log_read(ui->logger, (uint32_t)idx, &ev)) break;
-            rs->log_cache[i].timestamp_s = ev.timestamp_s;
-            rs->log_cache[i].type        = ev.type;
-            rs->log_cache[i].soc_pct     = ev.soc_pct;
-            rs->log_cache[i].temp_bat    = ev.temp_bat;
-            rs->log_cache[i].voltage     = ev.voltage;
-            rs->log_cache[i].alarm_flags = ev.alarm_flags;
-            rs->log_cache_n++;
-        }
-    }
+    rs->log_total = log_total_local;
+    rs->log_cache_n = log_cache_n_local;
+    memcpy(rs->log_cache, log_cache_local, sizeof(log_cache_local));
 
     // ── UI state ─────────────────────────────────────────────
     rs->state       = ui->state;
@@ -694,8 +717,8 @@ void ui_init(UI *ui, Display *d, PowerControl *pwr, PowerSeq *pseq,
     ui->apply_settings = apply_settings;
     ui->state      = S_MAIN;
     ui->dirty      = true;
-    ui->brightness = cfg->ui_brightness;
-    ui->buzzer_en  = cfg->buzzer_en != 0;
+    ui->brightness = 100u;
+    ui->buzzer_en  = cfg->buzzer_preset != BUZ_PRESET_SILENT;
     ui->soc_anim   = snap ? snap->soc : 50.0f;
     ui->blink      = true;
     ui->last_activity_ms = to_ms_since_boot(get_absolute_time());
@@ -711,8 +734,10 @@ void ui_init(UI *ui, Display *d, PowerControl *pwr, PowerSeq *pseq,
     ui->render_lock_num = spin_lock_claim_unused(true);
     ui->render_lock     = spin_lock_instance(ui->render_lock_num);
 
-    if (ui->buz) buz_set_enabled(ui->buz, ui->buzzer_en);
-    st7789_set_brightness(ui->disp, ui->brightness);
+    if (ui->buz) {
+        buz_set_preset(ui->buz, (BuzzerPreset)cfg->buzzer_preset);
+        buz_set_enabled(ui->buz, cfg->buzzer_en != 0);
+    }
 
     _rs_publish(ui);
 }
@@ -751,8 +776,6 @@ static void _mark_activity(UI *ui, uint32_t now) {
     ui->last_activity_ms = now;
     if (ui->screensaver_active) {
         ui->screensaver_active = false;
-        ui->brightness = UI_BL_ACTIVE_PCT;
-        st7789_set_brightness(ui->disp, ui->brightness);
         ui->dirty = true;
     }
 }
@@ -760,12 +783,11 @@ static void _mark_activity(UI *ui, uint32_t now) {
 static void _anim_tick(UI *ui, uint32_t now) {
     bool charging = ui->pwr && pwr_is_charger_present(ui->pwr) && ui->snap &&
                     ui->snap->is_charging && ui->snap->i_net < -0.15f;
-    bool idle = (now - ui->last_activity_ms) >= UI_IDLE_SCREENSAVER_MS;
-    bool want_saver = charging && idle;
+    uint32_t idle_ms = now - ui->last_activity_ms;
+    bool want_saver = (charging && idle_ms >= UI_IDLE_SCREENSAVER_MS) ||
+                      (!charging && idle_ms >= UI_IDLE_DISCHARGE_SAVER_MS);
     if (want_saver != ui->screensaver_active) {
         ui->screensaver_active = want_saver;
-        ui->brightness = want_saver ? UI_BL_DIM_PCT : UI_BL_ACTIVE_PCT;
-        st7789_set_brightness(ui->disp, ui->brightness);
         ui->dirty = true;
     }
 
@@ -779,6 +801,7 @@ static void _anim_tick(UI *ui, uint32_t now) {
         ui->anim_phase = (uint16_t)((ui->anim_phase + 10u) % 360u);
         ui->anim_phase_ms = now;
         ui->dirty = true;
+        if (ui->screensaver_active) _rs_publish(ui);
     }
 }
 
@@ -836,15 +859,10 @@ static void _click(UI *ui) {
             if (c == 0) {
                 ui->edit_active = true;
                 _rs_publish(ui);
-            } else if (c == 1) {
-                SystemSettings cfg;
-                settings_copy(&cfg);
-                cfg.buzzer_en = cfg.buzzer_en ? 0u : 1u;
-                _settings_apply(ui, &cfg, false, NULL);
-            } else if (c == 2) _go(ui, S_BAT_CFG);
-            else if (c == 3) _go(ui, S_TEMP_CFG);
-            else if (c == 4) _go(ui, S_CAL_CFG);
-            else if (c == 5) _go(ui, S_DATA_CFG);
+            } else if (c == 1) _go(ui, S_BAT_CFG);
+            else if (c == 2) _go(ui, S_TEMP_CFG);
+            else if (c == 3) _go(ui, S_CAL_CFG);
+            else if (c == 4) _go(ui, S_DATA_CFG);
             else _go(ui, S_ADVANCED);
             break;
         }
@@ -952,6 +970,7 @@ void ui_poll(UI *ui) {
 
     if (nav_step != 0) {
         _mark_activity(ui, now);
+        if (ui->buz) buz_play(ui->buz, BUZ_KEY_CLICK);
         if (ui->confirm_active) {
             _confirm_close(ui);
             nav_step = 0;
@@ -978,7 +997,7 @@ void ui_poll(UI *ui) {
             int max_scroll = (total > 8) ? (total - 8) : 0;
             ui->ev_scroll += (nav_step > 0 ? 1 : -1);
             if (ui->ev_scroll < 0) ui->ev_scroll = 0;
-            if (ui->ev_scroll > max_scroll) ui->ev_scroll = (int8_t)max_scroll;
+            if (ui->ev_scroll > max_scroll) ui->ev_scroll = (int16_t)max_scroll;
             _rs_publish(ui);
         } else if (ui->state == S_HISTORY) {
             ui->hist_page += (nav_step > 0 ? 1 : -1);
@@ -1709,13 +1728,13 @@ static void _format_log_age(uint32_t sec, char *buf, size_t n) {
 static const char *_log_type_name(uint8_t type) {
     switch (type) {
         case LOG_BOOT: return "BOOT";
-        case LOG_CHARGE_START: return "CHG+";
-        case LOG_CHARGE_END: return "CHG-";
-        case LOG_DISCHARGE_END: return "DIS-";
+        case LOG_CHARGE_START: return "CHARGE IN";
+        case LOG_CHARGE_END: return "CHARGE DONE";
+        case LOG_DISCHARGE_END: return "RUN DONE";
         case LOG_ALARM: return "ALARM";
-        case LOG_SOC_WARN: return "SOC";
-        case LOG_TEMP_WARN: return "TEMP";
-        case LOG_OCP: return "OCP";
+        case LOG_SOC_WARN: return "LOW SOC";
+        case LOG_TEMP_WARN: return "THERMAL";
+        case LOG_OCP: return "OCP CUT";
         case LOG_SAVE: return "SAVE";
         default: return "EVENT";
     }
@@ -1733,6 +1752,67 @@ static uint16_t _log_type_color(uint8_t type) {
         case LOG_OCP: return D_RED;
         case LOG_SAVE: return UI_NEON_BLUE;
         default: return D_TEXT;
+    }
+}
+
+static const char *_alarm_primary_name(uint32_t flags) {
+    if (flags & ALARM_CELL_OVP)    return "CELL OVP";
+    if (flags & ALARM_OCP_CUT)     return "OCP CUT";
+    if (flags & ALARM_OCP_WARN)    return "OCP WARN";
+    if (flags & ALARM_TEMP_CUT)    return "BAT TEMP CUT";
+    if (flags & ALARM_TEMP_SAFE)   return "BAT TEMP SAFE";
+    if (flags & ALARM_TEMP_WARN)   return "BAT TEMP";
+    if (flags & ALARM_INV_CUT)     return "USB TEMP CUT";
+    if (flags & ALARM_INV_SAFE)    return "USB TEMP SAFE";
+    if (flags & ALARM_INV_WARN)    return "USB TEMP";
+    if (flags & ALARM_CELL_CUT)    return "CELL CUT";
+    if (flags & ALARM_CELL_WARN)   return "CELL WARN";
+    if (flags & ALARM_VBAT_CUT)    return "VBAT CUT";
+    if (flags & ALARM_VBAT_WARN)   return "VBAT WARN";
+    if (flags & ALARM_SOC_CUT)     return "SOC CUT";
+    if (flags & ALARM_SOC_WARN)    return "SOC WARN";
+    if (flags & ALARM_DELTA_CUT)   return "DELTA CUT";
+    if (flags & ALARM_DELTA_WARN)  return "DELTA WARN";
+    if (flags & ALARM_COLD_CHARGE) return "COLD CHARGE";
+    if (flags & ALARM_I2C_FAULT)   return "I2C FAULT";
+    return "ALARM";
+}
+
+static void _format_log_value(uint8_t type, uint8_t soc_pct, uint8_t temp_bat,
+                              float voltage, float current, float param,
+                              uint32_t alarm_flags,
+                              char *buf, size_t n) {
+    switch (type) {
+        case LOG_BOOT:
+            snprintf(buf, n, "%u%%  %.2fV", soc_pct, voltage);
+            break;
+        case LOG_CHARGE_START:
+            snprintf(buf, n, "+%.1fA  %.2fV", current, voltage);
+            break;
+        case LOG_CHARGE_END:
+            snprintf(buf, n, "+%.0fWh  %u%%", param, soc_pct);
+            break;
+        case LOG_DISCHARGE_END:
+            snprintf(buf, n, "-%.0fWh  %u%%", param, soc_pct);
+            break;
+        case LOG_ALARM:
+            snprintf(buf, n, "%s", _alarm_primary_name(alarm_flags));
+            break;
+        case LOG_SOC_WARN:
+            snprintf(buf, n, "%u%% REMAIN", soc_pct);
+            break;
+        case LOG_TEMP_WARN:
+            snprintf(buf, n, "%uC  %.2fV", temp_bat, voltage);
+            break;
+        case LOG_OCP:
+            snprintf(buf, n, "LOAD CUT");
+            break;
+        case LOG_SAVE:
+            snprintf(buf, n, "%u%%  %.2fV", soc_pct, voltage);
+            break;
+        default:
+            snprintf(buf, n, "%u%%  %.2fV", soc_pct, voltage);
+            break;
     }
 }
 
@@ -1856,41 +1936,154 @@ static void __attribute__((unused)) _draw_cell_card(Display *d, int x, int y, in
     _draw_progress_bar(d, x + 8, y + h - 14, w - 16, 8, frac, col);
 }
 
-static void _render_charging_saver(Display *d, const FullUiSnapshot *rs) {
-    char soc_buf[16];
-    char cur_buf[16];
-    char volt_buf[16];
-    char power_buf[16];
-    char eta_buf[32];
-    char info_line[56];
+static void _draw_flow_particles(Display *d, int x, int y0, int h,
+                                 uint16_t phase, bool upward,
+                                 uint16_t col_hi, uint16_t col_lo) {
+    enum { N = 7, BAR_W = 4, BAR_H = 2 };
+    int seg;
+
+    if (h < N) return;
+    seg = h / N;
+    for (int i = 0; i < N; i++) {
+        int pos = (((int)phase * h) / 360 + i * seg) % h;
+        int py = upward ? (y0 + h - 1 - pos) : (y0 + pos);
+        int mid_dist = pos > (h / 2) ? pos - (h / 2) : (h / 2) - pos;
+        uint16_t c;
+
+        if (mid_dist > (h * 2 / 5)) continue;
+        c = (mid_dist < (h / 4)) ? col_hi : col_lo;
+        disp_fill_rect(d, x, py, BAR_W, BAR_H, c);
+    }
+}
+
+static void _render_charge_saver_anim(Display *d, const FullUiSnapshot *rs) {
+    const int w = 240;
+    const int h = 280;
+    const int cx = w / 2;
+    const int cy = 108;
+    const int ring_r = 62;
+    const int ring_th = 10;
+    const int safe_x = D_SAFE_LEFT + 8;
+    const int safe_w = w - (D_SAFE_LEFT + D_SAFE_RIGHT + 16);
     const BatSnapshot *b = &rs->bat;
-    uint16_t soc_col = _soc_color(b->soc);
+    float soc = _clampf_local(rs->soc_anim, 0.0f, 100.0f);
+    float frac = soc / 100.0f;
     float charge_power_w = _display_power_w(rs, b);
+    char buf[32];
 
     _draw_grid_background(d);
-    _draw_screen_title(d, "CHARGING", rs->charger_present ? "INPUT DETECTED" : "");
-    snprintf(soc_buf, sizeof(soc_buf), "%d%%", (int)b->soc);
-    snprintf(cur_buf, sizeof(cur_buf), "+%.1fA", b->i_chg);
-    snprintf(volt_buf, sizeof(volt_buf), "%.1fV", b->voltage);
-    snprintf(power_buf, sizeof(power_buf), "+%.0fW", charge_power_w);
-    snprintf(info_line, sizeof(info_line), "%s   %s   %s", soc_buf, volt_buf, cur_buf);
 
-    _draw_panel_box(d, 12, 42, 216, 74, UI_BLUE_DIM, soc_col, UI_BG_PANEL2, true);
-    disp_text(d, 20, 50, "CHARGE STATUS", D_SUBTEXT);
-    _draw_progress_bar(d, 20, 72, 188, 12, b->soc / 100.0f, soc_col);
-    disp_text_center_safe(d, 92, info_line, D_WHITE);
+    disp_ring_arc(d, cx, cy, ring_r, ring_th, 135.0f, 270.0f, frac,
+                  UI_NEON_GRN, UI_BG_PANEL);
 
-    if (b->time_min > 0 && b->time_min < 9999) {
-        snprintf(eta_buf, sizeof(eta_buf), "TO FULL %dh%02dm", b->time_min / 60, b->time_min % 60);
-    } else {
-        snprintf(eta_buf, sizeof(eta_buf), "ESTIMATING TIME");
+    if (((rs->anim_phase / 30u) % 3u) != 0u && frac > 0.01f) {
+        disp_ring_arc(d, cx, cy, ring_r + 4, 2, 135.0f, 270.0f * frac, 1.0f,
+                      D_GREEN, 0);
     }
 
-    _draw_value_card(d, 12, 130, 104, 42, "POWER", power_buf, UI_NEON_GRN, false, true);
-    _draw_value_card(d, 124, 130, 104, 42, "PACK", volt_buf, D_ACCENT, false, true);
-    _draw_list_card(d, 12, 184, 216, 30, "STATUS", "CHARGE ACTIVE", D_GREEN, false);
-    _draw_list_card(d, 12, 222, 216, 30, "ETA", eta_buf, D_TEXT, false);
-    disp_text_center_safe(d, 254, "PRESS ANY KEY", D_SUBTEXT);
+    snprintf(buf, sizeof(buf), "%d%%", (int)soc);
+    _text_center_box(d, cx - 32, 64, cy - 8, buf, D_WHITE, 2);
+
+    enum { FY = 38, FH = 176, FLOW_L0 = D_SAFE_LEFT + 4, FLOW_L1 = D_SAFE_LEFT + 12 };
+    _draw_flow_particles(d, FLOW_L0, FY, FH, rs->anim_phase, true, UI_NEON_GRN, UI_GRID_DIM);
+    _draw_flow_particles(d, FLOW_L1, FY, FH, (uint16_t)((rs->anim_phase + 120u) % 360u),
+                         true, D_GREEN, UI_GRID_DIM);
+    _draw_flow_particles(d, w - D_SAFE_RIGHT - 8, FY, FH, (uint16_t)((rs->anim_phase + 60u) % 360u),
+                         true, UI_NEON_GRN, UI_GRID_DIM);
+    _draw_flow_particles(d, w - D_SAFE_RIGHT - 16, FY, FH, (uint16_t)((rs->anim_phase + 180u) % 360u),
+                         true, D_GREEN, UI_GRID_DIM);
+
+    disp_text_center_safe(d, cy + ring_r + 20, "CHARGING", UI_NEON_GRN);
+
+    snprintf(buf, sizeof(buf), "%.1fV   %.1fA",
+             b->voltage, b->i_chg > 0.0f ? b->i_chg : -b->i_net);
+    disp_text_center_safe(d, cy + ring_r + 34, buf, D_SUBTEXT);
+
+    snprintf(buf, sizeof(buf), "+%.0fW", charge_power_w);
+    _text_center_box(d, safe_x, safe_w, h - 64, buf, UI_NEON_GRN, 2);
+
+    if (b->time_min > 0 && b->time_min < 9999) {
+        snprintf(buf, sizeof(buf), "%dH %02dM TO FULL",
+                 b->time_min / 60, b->time_min % 60);
+        disp_text_center_safe(d, h - 38, buf, D_GREEN);
+    } else {
+        disp_text_center_safe(d, h - 38, "ESTIMATING...", D_SUBTEXT);
+    }
+}
+
+static void _render_discharge_saver_anim(Display *d, const FullUiSnapshot *rs) {
+    const int w = 240;
+    const int h = 280;
+    const int cx = w / 2;
+    const int cy = 108;
+    const int ring_r = 62;
+    const int ring_th = 10;
+    const int safe_x = D_SAFE_LEFT + 8;
+    const int safe_w = w - (D_SAFE_LEFT + D_SAFE_RIGHT + 16);
+    const BatSnapshot *b = &rs->bat;
+    float soc = _clampf_local(rs->soc_anim, 0.0f, 100.0f);
+    float frac = soc / 100.0f;
+    uint16_t ring_col;
+    uint16_t glow_col;
+    char buf[32];
+
+    if (soc > 50.0f) {
+        ring_col = UI_NEON_GRN;
+        glow_col = D_GREEN;
+    } else if (soc > 20.0f) {
+        ring_col = UI_NEON_AMB;
+        glow_col = D_ORANGE;
+    } else {
+        ring_col = D_RED;
+        glow_col = D_RED;
+    }
+
+    disp_fill(d, UI_BG_DARK);
+
+    disp_ring_arc(d, cx, cy, ring_r, ring_th, 135.0f, 270.0f, frac,
+                  ring_col, UI_BG_PANEL);
+
+    if (((rs->anim_phase / 45u) % 2u) == 0u && frac > 0.01f) {
+        disp_ring_arc(d, cx, cy, ring_r + 4, 2, 135.0f, 270.0f * frac, 1.0f,
+                      glow_col, 0);
+    }
+
+    snprintf(buf, sizeof(buf), "%d%%", (int)soc);
+    _text_center_box(d, cx - 32, 64, cy - 8, buf, D_WHITE, 2);
+
+    enum { FY = 38, FH = 176, FLOW_L0 = D_SAFE_LEFT + 4, FLOW_L1 = D_SAFE_LEFT + 12 };
+    _draw_flow_particles(d, FLOW_L0, FY, FH, rs->anim_phase, false, ring_col, UI_GRID_DIM);
+    _draw_flow_particles(d, FLOW_L1, FY, FH, (uint16_t)((rs->anim_phase + 120u) % 360u),
+                         false, glow_col, UI_GRID_DIM);
+    _draw_flow_particles(d, w - D_SAFE_RIGHT - 8, FY, FH, (uint16_t)((rs->anim_phase + 60u) % 360u),
+                         false, ring_col, UI_GRID_DIM);
+    _draw_flow_particles(d, w - D_SAFE_RIGHT - 16, FY, FH, (uint16_t)((rs->anim_phase + 180u) % 360u),
+                         false, glow_col, UI_GRID_DIM);
+
+    disp_text_center_safe(d, cy + ring_r + 20,
+                          (b->power_w >= 1.0f) ? "OUTPUT ACTIVE" : "STANDBY",
+                          ring_col);
+
+    snprintf(buf, sizeof(buf), "%.1fV PACK", b->voltage);
+    disp_text_center_safe(d, cy + ring_r + 34, buf, D_SUBTEXT);
+
+    if (b->power_w >= 1.0f) {
+        snprintf(buf, sizeof(buf), "%.0fW", b->power_w);
+        _text_center_box(d, safe_x, safe_w, h - 64, buf, ring_col, 2);
+    } else {
+        _text_center_box(d, safe_x, safe_w, h - 64, "STANDBY", ring_col, 2);
+    }
+
+    if (b->time_min > 0 && b->time_min < 6000) {
+        int hh = b->time_min / 60;
+        int mm = b->time_min % 60;
+        if (hh > 0) snprintf(buf, sizeof(buf), "%dH %02dM LEFT", hh, mm);
+        else snprintf(buf, sizeof(buf), "%dM LEFT", mm);
+        disp_text_center_safe(d, h - 38, buf, glow_col);
+    } else {
+        snprintf(buf, sizeof(buf), "%.1fV  %.0fWH", b->voltage, b->remaining_wh);
+        disp_text_center_safe(d, h - 38, buf, D_SUBTEXT);
+    }
 }
 
 #pragma GCC diagnostic push
@@ -2210,14 +2403,12 @@ static void _render_ports(Display *d, const FullUiSnapshot *rs) {
 
 static void _render_ui_cfg(Display *d, const FullUiSnapshot *rs) {
     int sel = rs->cur[S_UI_CFG];
-    char bright_buf[8];
     const UiIcon *icons[] = {&UI_ICON_SUN, &UI_ICON_POWER, &UI_ICON_SETTINGS};
-    snprintf(bright_buf, sizeof(bright_buf), "%d%%", rs->brightness);
 
     disp_header(d, "SETTINGS", NULL);
 
     struct { const char *lbl; const char *val; } items[3] = {
-        {"Brightness", bright_buf},
+        {"Backlight",  "FIXED 3V3"},
         {"Buzzer",     rs->buzzer_en ? "ON " : "OFF"},
         {"Advanced >", ""},
     };
@@ -2492,23 +2683,21 @@ static void _render_ports_ref(Display *d, const FullUiSnapshot *rs) {
 
 static void _render_ui_cfg_ref(Display *d, const FullUiSnapshot *rs) {
     int sel = rs->cur[S_UI_CFG];
-    char bright_buf[8];
+    const char *sound = buz_preset_name((BuzzerPreset)rs->settings.buzzer_preset);
 
     _draw_grid_background(d);
     _draw_screen_title(d, "SETTINGS", NULL);
 
-    snprintf(bright_buf, sizeof(bright_buf), "%d%%", rs->brightness);
-    _draw_list_card(d, 12, 40, 216, 22, "DISPLAY", bright_buf, UI_NEON_AMB, sel == 0);
-    _draw_list_card(d, 12, 66, 216, 22, "BUZZER", rs->buzzer_en ? "ON" : "OFF",
-                    rs->buzzer_en ? D_GREEN : D_SUBTEXT, sel == 1);
-    _draw_list_card(d, 12, 92, 216, 22, "BATTERY LIMITS", "OPEN", UI_NEON_AMB, sel == 2);
-    _draw_list_card(d, 12, 118, 216, 22, "THERMAL MODES", "OPEN", UI_NEON_GRN, sel == 3);
-    _draw_list_card(d, 12, 144, 216, 22, "CALIBRATION", "OPEN", UI_NEON_BLUE, sel == 4);
-    _draw_list_card(d, 12, 170, 216, 22, "LOG DATA", "OPEN", UI_NEON_BLUE, sel == 5);
-    _draw_list_card(d, 12, 196, 216, 22, "SERVICE", "OPEN", UI_NEON_GRN, sel == 6);
+    _draw_list_card(d, 12, 40, 216, 22, "SOUND", sound,
+                    rs->buzzer_en ? D_GREEN : D_SUBTEXT, sel == 0);
+    _draw_list_card(d, 12, 66, 216, 22, "BATTERY LIMITS", "OPEN", UI_NEON_AMB, sel == 1);
+    _draw_list_card(d, 12, 92, 216, 22, "THERMAL MODES", "OPEN", UI_NEON_GRN, sel == 2);
+    _draw_list_card(d, 12, 118, 216, 22, "CALIBRATION", "OPEN", UI_NEON_BLUE, sel == 3);
+    _draw_list_card(d, 12, 144, 216, 22, "LOG DATA", "OPEN", UI_NEON_BLUE, sel == 4);
+    _draw_list_card(d, 12, 170, 216, 22, "SERVICE", "OPEN", UI_NEON_GRN, sel == 5);
     _draw_list_card(d, 12, 228, 216, 22, "MODE",
-                    rs->edit_active ? "EDIT VALUE" :
-                    (sel == 0 ? "OK TO EDIT" : (sel == 1 ? "OK TO TOGGLE" : "OK TO OPEN")),
+                    rs->edit_active ? "UP/DN CHANGE PRESET" :
+                    (sel == 0 ? "OK TO EDIT" : "OK TO OPEN"),
                     rs->edit_active ? D_ACCENT : D_TEXT, false);
     _draw_menu_footer(d, rs, "OK=EDIT/OPEN", "HOLD=BACK");
 }
@@ -2754,8 +2943,8 @@ static void _render_advanced_ref(Display *d, const FullUiSnapshot *rs) {
 static void _render_events(Display *d, const FullUiSnapshot *rs) {
     char title_right[16];
     char age_buf[8];
-    char label_buf[20];
-    char value_buf[20];
+    char label_buf[28];
+    char value_buf[24];
 
     _draw_grid_background(d);
     if (rs->log_total > 0) snprintf(title_right, sizeof(title_right), "%lu EV", (unsigned long)rs->log_total);
@@ -2763,20 +2952,27 @@ static void _render_events(Display *d, const FullUiSnapshot *rs) {
     _draw_screen_title(d, "EVENT LOG", title_right);
 
     if (rs->log_total == 0 || rs->log_cache_n == 0) {
-        _draw_list_card(d, 12, 118, 216, 24, "STATUS", "NO EVENTS", D_SUBTEXT, false);
+        _draw_list_card(d, 12, 118, 216, 24, "STATUS", "NO EVENTS YET", D_SUBTEXT, false);
     } else {
         int shown = rs->log_cache_n < 8 ? rs->log_cache_n : 8;
         for (int row = 0; row < shown; row++) {
             _format_log_age(rs->log_cache[row].timestamp_s, age_buf, sizeof(age_buf));
             snprintf(label_buf, sizeof(label_buf), "%s  %s", age_buf, _log_type_name(rs->log_cache[row].type));
-            snprintf(value_buf, sizeof(value_buf), "%d%%  %.2fV",
-                     rs->log_cache[row].soc_pct, rs->log_cache[row].voltage);
+            _format_log_value(rs->log_cache[row].type,
+                              rs->log_cache[row].soc_pct,
+                              rs->log_cache[row].temp_bat,
+                              rs->log_cache[row].voltage,
+                              rs->log_cache[row].current,
+                              rs->log_cache[row].param,
+                              rs->log_cache[row].alarm_flags,
+                              value_buf, sizeof(value_buf));
             _draw_list_card(d, 12, 42 + row * 24, 216, 20, label_buf, value_buf,
                             _log_type_color(rs->log_cache[row].type), false);
         }
         _draw_scrollbar(d, 228, 42, shown * 24 - 4, (int)rs->log_total, shown, rs->ev_scroll);
     }
 
+    _draw_list_card(d, 12, 238, 216, 18, "VIEW", "NEWEST FIRST", D_SUBTEXT, false);
     _draw_footer_hint(d, "OK=BACK", "UP/DN=SCROLL");
     _badge_safe(d, rs);
 }
@@ -3055,36 +3251,47 @@ static void _render_safe_splash(Display *d) {
 static void _render_poweroff_splash(Display *d, const FullUiSnapshot *rs) {
     char buf[24];
     uint16_t accent = rs->blink ? D_ORANGE : UI_NEON_AMB;
+    uint16_t accent_glow = rs->blink ? UI_NEON_AMB : D_ORANGE;
     uint32_t remain_s = (rs->poweroff_remaining_ms + 999u) / 1000u;
     uint32_t countdown_total_ms = (uint32_t)(BTN_POWEROFF_MS - BTN_LONG_MS);
-    int fill;
+    float frac;
+    const int w = 240;
+    const int h = 280;
+    const int cx = w / 2;
+    const int cy = 108;
+    const int ring_r = 62;
+    const int ring_th = 10;
     if (remain_s == 0) remain_s = 1;
+    frac = (countdown_total_ms > 0u)
+        ? _clampf_local((float)(countdown_total_ms - rs->poweroff_remaining_ms) /
+                        (float)countdown_total_ms, 0.0f, 1.0f)
+        : 1.0f;
 
     _draw_grid_background(d);
-    _draw_screen_title(d, "POWER OFF", NULL);
 
-    _draw_panel_box(d, 24, 42, 192, 68, UI_BLUE_DIM, accent, UI_BG_PANEL, true);
-    _draw_icon(d, 96, 50, &UI_ICON_LOCK, accent, 2);
-    _text_center_box(d, 24, 192, 82, "Keep holding OK", D_WHITE, 1);
-    _text_center_box(d, 24, 192, 96, "Release to cancel", D_SUBTEXT, 1);
+    disp_ring_arc(d, cx, cy, ring_r, ring_th, 135.0f, 270.0f, frac,
+                  accent, UI_BG_PANEL);
+    if (((rs->anim_phase / 30u) % 3u) != 0u && frac > 0.01f) {
+        disp_ring_arc(d, cx, cy, ring_r + 4, 2, 135.0f, 270.0f * frac, 1.0f,
+                      accent_glow, 0);
+    }
 
-    _text_center_box(d, 24, 192, 124, "COUNTDOWN", D_SUBTEXT, 1);
+    enum { FY = 38, FH = 176, FLOW_L0 = D_SAFE_LEFT + 4, FLOW_L1 = D_SAFE_LEFT + 12 };
+    _draw_flow_particles(d, FLOW_L0, FY, FH, rs->anim_phase, false, accent_glow, UI_GRID_DIM);
+    _draw_flow_particles(d, FLOW_L1, FY, FH, (uint16_t)((rs->anim_phase + 120u) % 360u),
+                         false, accent, UI_GRID_DIM);
+    _draw_flow_particles(d, w - D_SAFE_RIGHT - 8, FY, FH, (uint16_t)((rs->anim_phase + 60u) % 360u),
+                         false, accent_glow, UI_GRID_DIM);
+    _draw_flow_particles(d, w - D_SAFE_RIGHT - 16, FY, FH, (uint16_t)((rs->anim_phase + 180u) % 360u),
+                         false, accent, UI_GRID_DIM);
 
+    _draw_icon(d, cx - 8, cy - 38, &UI_ICON_LOCK, accent, 1);
     snprintf(buf, sizeof(buf), "%lus", (unsigned long)remain_s);
-    _draw_panel_box(d, 56, 136, 128, 46, UI_BLUE_DIM, accent, UI_BG_PANEL2, true);
-    _text_center_box(d, 56, 128, 148, buf, accent, 2);
+    _text_center_box(d, cx - 40, 80, cy - 8, buf, D_WHITE, 2);
 
-    _draw_panel_box(d, 24, 192, 192, 36, UI_BLUE_DIM, accent, UI_BG_PANEL, false);
-    disp_fill_rect(d, 36, 204, 168, 12, UI_BG_PANEL2);
-    disp_rect(d, 36, 204, 168, 12, accent);
-    fill = (countdown_total_ms > 0)
-        ? (int)((168.0f * (float)(countdown_total_ms - rs->poweroff_remaining_ms)) /
-                (float)countdown_total_ms)
-        : 0;
-    if (fill > 2) disp_fill_rect(d, 37, 205, fill - 2, 10, accent);
-
-    _text_center_box(d, 24, 192, 238, "System will shut down", D_TEXT, 1);
-    _text_center_box(d, 24, 192, 252, "when the bar is full", D_SUBTEXT, 1);
+    disp_text_center_safe(d, cy + ring_r + 20, "POWER OFF", accent_glow);
+    disp_text_center_safe(d, cy + ring_r + 34, "KEEP HOLDING OK", D_TEXT);
+    disp_text_center_safe(d, h - 38, "RELEASE TO CANCEL", D_SUBTEXT);
 }
 
 void ui_render(UI *ui) {
@@ -3105,7 +3312,11 @@ void ui_render(UI *ui) {
     } else if (rs.safe_mode && !rs.startup_ok && rs.state != S_DIAGNOSTICS) {
         _render_safe_splash(d);
     } else if (rs.screensaver_active) {
-        _render_charging_saver(d, &rs);
+        if (rs.charger_present && rs.bat.is_charging) {
+            _render_charge_saver_anim(d, &rs);
+        } else {
+            _render_discharge_saver_anim(d, &rs);
+        }
     } else {
         switch (rs.state) {
             case S_MAIN:     _render_main_ref(d, &rs);        break;

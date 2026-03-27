@@ -706,7 +706,11 @@ int main(void) {
         printf("[SOH] committing deferred v3->v4 migration\n");
         bat_save(&g_bat);
     }
-    log_boot(&g_logger, g_bat.soc, g_bat.voltage);
+    if (g_core1_ready) {
+        log_boot(&g_logger, g_bat.soc, g_bat.voltage);
+    } else {
+        printf("[BOOT] core1 not ready, boot log skipped\n");
+    }
     printf("[BOOT] done\n");
 
     // в”Ђв”Ђ Core0 main loop в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ

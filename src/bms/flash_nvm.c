@@ -6,8 +6,19 @@
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "pico/multicore.h"
+#include <assert.h>
 #include <string.h>
 #include <stdio.h>
+
+static inline void _nvm_single_core_guard(void) {
+    // Current firmware writes NVM only from Core0; keep this explicit
+    // because several helpers use shared static buffers.
+    assert(get_core_num() == 0);
+}
+
+static bool _seq_is_newer(uint32_t a, uint32_t b) {
+    return (int32_t)(a - b) > 0;
+}
 
 // ── CRC32 ────────────────────────────────────────────────────
 uint32_t nvm_crc32(const void *buf, size_t len) {
@@ -30,6 +41,8 @@ void nvm_read(uint32_t flash_offset, void *dst, size_t len) {
 // P0.2 / P3.14 fix: multicore_lockout + irq disable for ALL flash ops.
 // Core1 must call multicore_lockout_victim_init() at startup.
 void nvm_write_sector(uint32_t flash_offset, const uint8_t *src) {
+    _nvm_single_core_guard();
+    assert((flash_offset % FLASH_SECTOR_SIZE) == 0u);
     // flash_offset must be sector-aligned
     multicore_lockout_start_blocking();
     uint32_t ints = save_and_disable_interrupts();
@@ -40,10 +53,32 @@ void nvm_write_sector(uint32_t flash_offset, const uint8_t *src) {
     multicore_lockout_end_blocking();
 }
 
+void nvm_erase_sector(uint32_t flash_offset) {
+    _nvm_single_core_guard();
+    assert((flash_offset % FLASH_SECTOR_SIZE) == 0u);
+    multicore_lockout_start_blocking();
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(flash_offset, FLASH_SECTOR_SIZE);
+    restore_interrupts(ints);
+    multicore_lockout_end_blocking();
+}
+
+void nvm_program_page(uint32_t flash_offset, const uint8_t *src) {
+    _nvm_single_core_guard();
+    assert((flash_offset % FLASH_PAGE_SIZE) == 0u);
+    multicore_lockout_start_blocking();
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_program(flash_offset, src, FLASH_PAGE_SIZE);
+    restore_interrupts(ints);
+    multicore_lockout_end_blocking();
+}
+
 // ── Patch (read-modify-write) ────────────────────────────────
 void nvm_patch(uint32_t flash_offset, const void *src, size_t len) {
+    _nvm_single_core_guard();
     uint32_t sector_start = (flash_offset / FLASH_SECTOR_SIZE) * FLASH_SECTOR_SIZE;
     uint32_t in_sector    = flash_offset - sector_start;
+    assert((in_sector + len) <= FLASH_SECTOR_SIZE);
 
     static uint8_t sector_buf[FLASH_SECTOR_SIZE];
     nvm_read(sector_start, sector_buf, FLASH_SECTOR_SIZE);
@@ -65,6 +100,7 @@ void nvm_patch(uint32_t flash_offset, const void *src, size_t len) {
 
 static bool _slot_valid(uint32_t flash_off, uint32_t magic,
                         size_t payload_sz, uint32_t *seq_out) {
+    _nvm_single_core_guard();
     // We only need first (8 + payload_sz + 4) bytes
     size_t rec_sz = 8 + payload_sz + 4;
     if (rec_sz > FLASH_SECTOR_SIZE) return false;
@@ -89,6 +125,7 @@ bool nvm_ab_load(uint32_t flash_off_a, uint32_t flash_off_b,
                  uint32_t magic,
                  void *payload, size_t payload_sz,
                  uint32_t *seq_out, uint8_t *active_slot_out) {
+    _nvm_single_core_guard();
     uint32_t seq_a = 0, seq_b = 0;
     bool va = _slot_valid(flash_off_a, magic, payload_sz, &seq_a);
     bool vb = _slot_valid(flash_off_b, magic, payload_sz, &seq_b);
@@ -99,9 +136,9 @@ bool nvm_ab_load(uint32_t flash_off_a, uint32_t flash_off_b,
     uint32_t best_seq;
     uint8_t  slot;
 
-    if      (va && vb) { slot = (seq_a >= seq_b) ? 0 : 1;
-                         best_off = (seq_a >= seq_b) ? flash_off_a : flash_off_b;
-                         best_seq = (seq_a >= seq_b) ? seq_a : seq_b; }
+    if      (va && vb) { slot = (_seq_is_newer(seq_a, seq_b) || seq_a == seq_b) ? 0 : 1;
+                         best_off = (slot == 0) ? flash_off_a : flash_off_b;
+                         best_seq = (slot == 0) ? seq_a : seq_b; }
     else if (va)       { slot = 0; best_off = flash_off_a; best_seq = seq_a; }
     else               { slot = 1; best_off = flash_off_b; best_seq = seq_b; }
 
@@ -116,6 +153,7 @@ bool nvm_ab_save(uint32_t flash_off_a, uint32_t flash_off_b,
                  uint32_t magic,
                  uint32_t *seq_inout, uint8_t *active_slot_inout,
                  const void *payload, size_t payload_sz) {
+    _nvm_single_core_guard();
     size_t rec_sz = 8 + payload_sz + 4;
     if (rec_sz > FLASH_SECTOR_SIZE) return false;
 

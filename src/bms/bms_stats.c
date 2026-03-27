@@ -87,6 +87,7 @@ static void _stats_reset_payload(BmsStats *s, uint32_t boot_count, float soh_see
     s->session_wh_in = 0.0f;
     s->session_peak_a = 0.0f;
     s->session_peak_w = 0.0f;
+    s->runtime_at_boot_h = 0.0f;
     s->initialized = true;
     s->dirty = true;
 }
@@ -103,6 +104,7 @@ void stats_init(BmsStats *s) {
         s->flash      = f;
         s->_nvm_seq   = seq;
         s->_nvm_slot  = slot;
+        s->runtime_at_boot_h = f.runtime_h;
         printf("[STATS] loaded: boots=%lu EFC=%.1f out=%.0fWh\n",
                (unsigned long)f.boot_count, f.efc_total, f.energy_out_wh);
     } else if (ok && f.version == 2u) {
@@ -114,6 +116,7 @@ void stats_init(BmsStats *s) {
         s->flash.peukert_calibrated = STATS_DEFAULT_PEUKERT;
         s->_nvm_seq = seq;
         s->_nvm_slot = slot;
+        s->runtime_at_boot_h = s->flash.runtime_h;
         printf("[STATS] migrated v2->v3: boots=%lu EFC=%.1f out=%.0fWh\n",
                (unsigned long)f.boot_count, f.efc_total, f.energy_out_wh);
     } else {
@@ -197,8 +200,8 @@ bool stats_save(BmsStats *s) {
 
     StatsFlash *f = &s->flash;
 
-    // P1.6: update runtime_h from actual uptime
-    f->runtime_h = stats_session_hours();
+    // Lifetime runtime = value loaded from flash + current boot session.
+    f->runtime_h = s->runtime_at_boot_h + stats_session_hours();
 
     // P1.6: flush session accumulators into flash record
     f->session_energy_out_wh = s->session_wh_out;
@@ -234,6 +237,7 @@ void stats_reset(BmsStats *s) {
     soh_seed = (s->flash.soh_last > 0.0f && s->flash.soh_last <= 100.0f)
         ? s->flash.soh_last : 100.0f;
     _stats_reset_payload(s, 1u, soh_seed);
+    s->runtime_at_boot_h = 0.0f;
     stats_save(s);
     printf("[STATS] lifetime stats reset\n");
 }

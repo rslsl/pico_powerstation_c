@@ -29,10 +29,14 @@ typedef enum {
 typedef struct PowerControl {
     uint8_t      gpio[PORT_COUNT];
     bool         state[PORT_COUNT];
+    bool         desired_state[PORT_COUNT];
     bool         safe_mode;
     PowerPolicy  policy;
     bool         charger_present;
     bool         charge_inhibit;  // advisory flag only in this HW revision
+    uint32_t     persist_seq;
+    uint8_t      persist_slot;
+    bool         persist_ready;
 } PowerControl;
 
 void pwr_init(PowerControl *pwr);
@@ -48,6 +52,12 @@ void pwr_enable (PowerControl *pwr, PortId p);
 void pwr_disable(PowerControl *pwr, PortId p);
 void pwr_toggle (PowerControl *pwr, PortId p);
 bool pwr_is_on  (const PowerControl *pwr, PortId p);
+bool pwr_user_desired_on(const PowerControl *pwr, PortId p);
+
+// User-intent relay control with persistence across power cycles.
+void pwr_user_set   (PowerControl *pwr, PortId p, bool on);
+void pwr_user_toggle(PowerControl *pwr, PortId p);
+void pwr_restore_user_state(PowerControl *pwr);
 
 // Disable all load relays while keeping SYSTEM_HOLD active.
 void pwr_emergency_off(PowerControl *pwr);
