@@ -10,6 +10,7 @@
 #include "power_control.h"
 #include "power_sequencer.h"
 #include "buzzer.h"
+#include "esp_manager.h"
 #include "protection.h"
 #include "system_settings.h"
 #include "../bms/battery.h"
@@ -33,6 +34,8 @@ typedef enum {
     S_EVENTS = 13,
     S_HISTORY = 14,
     S_I2C_SCAN = 15,
+    S_ESP_CFG = 16,
+    S_OTA = 17,
     S_COUNT
 } UiState;
 
@@ -44,6 +47,7 @@ typedef enum {
     UI_CONFIRM_RESET_STATS = 4,
     UI_CONFIRM_RESET_STATS_FINAL = 5,
     UI_CONFIRM_APPLY_CALIB = 6,
+    UI_CONFIRM_PICO_MODE_REBOOT = 7,
 } UiConfirmAction;
 
 typedef void (*UiSettingsApplyFn)(bool reconfigure_sensors);
@@ -77,6 +81,18 @@ typedef struct {
     uint32_t total_alarm_events;
     uint32_t total_ocp_events;
     uint32_t total_temp_events;
+    uint8_t esp_mode;
+    bool esp_powered;
+    bool esp_link_up;
+    char esp_status[24];
+
+    uint8_t  ota_state;
+    uint8_t  ota_progress_pct;
+    uint32_t ota_bytes_written;
+    uint32_t ota_image_size;
+    bool     ota_reboot_pending;
+    char     ota_version[24];
+    char     ota_error[48];
 
     uint32_t log_total;
     struct {
@@ -127,6 +143,7 @@ typedef struct {
     PowerControl *pwr;
     PowerSeq *pseq;
     Buzzer *buz;
+    EspManager *esp;
     BatSnapshot *snap;
     Protection *prot;
     BmsStats *stats;
@@ -189,7 +206,7 @@ typedef struct {
 } UI;
 
 void ui_init(UI *ui, Display *d, PowerControl *pwr, PowerSeq *pseq,
-             Buzzer *buz, BatSnapshot *snap, Protection *prot,
+             Buzzer *buz, EspManager *esp, BatSnapshot *snap, Protection *prot,
              BmsStats *stats, BmsLogger *logger,
              UiSettingsApplyFn apply_settings);
 

@@ -24,6 +24,7 @@ typedef enum {
     BOOT_NORMAL = 0,
     BOOT_CHARGE_ONLY,
     BOOT_DIAGNOSTIC,
+    BOOT_OTA_SAFE,
 } BootMode;
 
 typedef struct {
@@ -35,7 +36,7 @@ typedef struct {
 void     pseq_latch(PowerSeq *ps);
 
 // Step 2: resolve boot mode after startup validation.
-BootMode pseq_resolve(PowerSeq *ps, bool startup_ok, float soc_ocv);
+BootMode pseq_resolve(PowerSeq *ps, bool startup_ok, float soc_ocv, bool ota_safe_requested);
 
 // Power-off path. Does not return.
 void     pseq_self_off(PowerSeq *ps, const char *msg);

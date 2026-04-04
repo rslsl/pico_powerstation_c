@@ -4,7 +4,20 @@
 #include <stdint.h>
 
 #define SETTINGS_MAGIC   0x53595453u
-#define SETTINGS_VERSION 3u
+#define SETTINGS_VERSION 5u
+
+typedef enum {
+    ESP_MODE_OFF = 0,
+    ESP_MODE_WEB = 1,
+    ESP_MODE_OTA = 2,
+    ESP_MODE_COUNT
+} EspMode;
+
+typedef enum {
+    PICO_MODE_NORMAL = 0,
+    PICO_MODE_OTA_SAFE = 1,
+    PICO_MODE_COUNT
+} PicoMode;
 
 typedef struct __attribute__((packed)) {
     uint16_t version;
@@ -47,7 +60,8 @@ typedef struct __attribute__((packed)) {
     uint8_t ui_brightness;
     uint8_t buzzer_en;
     uint8_t buzzer_preset;
-    uint8_t _pad;
+    uint8_t esp_mode;
+    uint8_t pico_mode;
 } SystemSettings;
 
 _Static_assert(sizeof(SystemSettings) <= 4080, "SystemSettings payload too large");
@@ -58,3 +72,7 @@ void settings_copy(SystemSettings *out);
 const SystemSettings *settings_get(void);
 bool settings_store(const SystemSettings *next);
 bool settings_reset_defaults(void);
+bool settings_migration_pending(void);
+bool settings_flush_pending_migration(void);
+
+const char *pico_mode_name(PicoMode mode);

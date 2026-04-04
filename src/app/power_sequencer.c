@@ -39,16 +39,18 @@ void pseq_latch(PowerSeq *ps) {
     ps->latched = true;
 }
 
-BootMode pseq_resolve(PowerSeq *ps, bool startup_ok, float soc_ocv) {
+BootMode pseq_resolve(PowerSeq *ps, bool startup_ok, float soc_ocv, bool ota_safe_requested) {
     if (!startup_ok) {
         ps->mode = BOOT_DIAGNOSTIC;
+    } else if (ota_safe_requested) {
+        ps->mode = BOOT_OTA_SAFE;
     } else if (soc_ocv < 5.0f) {
         ps->mode = BOOT_CHARGE_ONLY;
     } else {
         ps->mode = BOOT_NORMAL;
     }
-    printf("[SEQ] boot mode: %d (ok=%d soc=%.1f%%)\n",
-           ps->mode, startup_ok, soc_ocv);
+    printf("[SEQ] boot mode: %d (ok=%d soc=%.1f%% ota_safe=%d)\n",
+           ps->mode, startup_ok, soc_ocv, ota_safe_requested ? 1 : 0);
     return ps->mode;
 }
 

@@ -4,7 +4,6 @@
 //
 // v4.0 fixes:
 //   P0.1  — Battery holds PowerControl* for real bat_emergency_off()
-//   P1.4  — cycle detection: _was_discharging flag
 //   P1.5  — BatSnapshot now includes dis_wh_total/chg_wh_total
 // ============================================================
 #include <stdint.h>
@@ -38,7 +37,7 @@ typedef struct {
     float    v_b1, v_b2, v_b3, delta_mv;
 
     // Calculated (every LOGIC_MS)
-    float    soc, soc_std, remaining_wh, r0_mohm;
+    float    soc, soc_std, remaining_wh, display_soc_pct, display_available_wh, r0_mohm;
     float    soh, efc;
     int      time_min;
     int      soh_rul_cycles;
@@ -66,13 +65,10 @@ typedef struct {
 
     // OCV / HPPC internal
     uint32_t _t_idle_ms;
-    uint32_t _discharge_active_ms;
     float    _v_before_idle;
     float    _i_before_idle;
     float    _v_prev, _i_prev;
 
-    // P1.4: cycle boundary detection
-    bool     _was_discharging;   // true if i_net > discharge threshold last tick
     bool     _eta_discharging;
     float    _eta_pause_s;
     uint32_t _eta_log_ms;
@@ -100,6 +96,8 @@ bool bat_save        (Battery *bat);
 void bat_emergency_off(Battery *bat);   // P0.1: now real implementation
 void bat_apply_settings(Battery *bat, float capacity_ah);
 void bat_seed_predictor(Battery *bat, float baseline_power_w, float peukert_n);
+void bat_cycle_begin(Battery *bat);
+void bat_cycle_end(Battery *bat);
 
 // FMEA-02: true only if measurement group bit is valid and not stale
 bool bat_meas_fresh(const Battery *bat, uint8_t group_bit);
@@ -110,7 +108,7 @@ typedef struct {
     float    voltage, v_chg_bus, i_dis, i_chg, i_net, power_w;
     float    temp_bat, temp_inv;
     float    v_b1, v_b2, v_b3, delta_mv;
-    float    soc, soc_std, remaining_wh, r0_mohm, soh, efc;
+    float    soc, soc_std, remaining_wh, display_soc_pct, display_available_wh, r0_mohm, soh, efc;
     bool     is_charging, is_idle;
     int      time_min;
     int      soh_rul_cycles;
