@@ -177,11 +177,17 @@ if(POWERSTATION_FLASH_16MB)
 endif()
 
 add_executable(pico_powerstation_slot_a ${POWERSTATION_APP_SOURCES})
-powerstation_configure_app_target(pico_powerstation_slot_a "${POWERSTATION_FW_TAG}-slot-a" 1)
+powerstation_configure_app_target(pico_powerstation_slot_a "${POWERSTATION_FW_TAG}-recovery-a" 1)
+target_compile_definitions(pico_powerstation_slot_a PRIVATE
+  POWERSTATION_RECOVERY_SLOT=1
+)
 pico_set_linker_script(pico_powerstation_slot_a ${POWERSTATION_SLOT_A_LD})
 
 add_executable(pico_powerstation_slot_b ${POWERSTATION_APP_SOURCES})
-powerstation_configure_app_target(pico_powerstation_slot_b "${POWERSTATION_FW_TAG}-slot-b" 2)
+powerstation_configure_app_target(pico_powerstation_slot_b "${POWERSTATION_FW_TAG}-main-b" 2)
+target_compile_definitions(pico_powerstation_slot_b PRIVATE
+  POWERSTATION_RECOVERY_SLOT=0
+)
 pico_set_linker_script(pico_powerstation_slot_b ${POWERSTATION_SLOT_B_LD})
 
 option(POWERSTATION_OTA_LOADER_DEBUG "Enable USB debug console in OTA loader" OFF)
@@ -322,6 +328,23 @@ if(PYTHON3)
   )
   add_custom_target(combined_loader_slot_a ALL
     DEPENDS ${CMAKE_BINARY_DIR}/combined_loader_slot_a.uf2
+  )
+
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/combined_loader_recovery_main.uf2
+    COMMAND ${PYTHON3} ${UF2_COMBINE_SCRIPT}
+      $<TARGET_FILE:picotool>
+      ${CMAKE_BINARY_DIR}/combined_loader_recovery_main.uf2
+      0xE48BFF56
+      0x10000000
+      ${CMAKE_BINARY_DIR}/pico_powerstation_loader.bin 0x0
+      ${CMAKE_BINARY_DIR}/pico_powerstation_slot_a.bin ${POWERSTATION_OTA_SLOT_A_OFFSET}
+      ${CMAKE_BINARY_DIR}/pico_powerstation_slot_b.bin ${POWERSTATION_OTA_SLOT_B_OFFSET}
+    DEPENDS pico_powerstation_loader pico_powerstation_slot_a pico_powerstation_slot_b ${UF2_COMBINE_SCRIPT}
+    COMMENT "Building combined loader + recovery slot_a + main slot_b UF2"
+  )
+  add_custom_target(combined_loader_recovery_main ALL
+    DEPENDS ${CMAKE_BINARY_DIR}/combined_loader_recovery_main.uf2
   )
 else()
   message(WARNING "Python3 not found; combined UF2 targets disabled")

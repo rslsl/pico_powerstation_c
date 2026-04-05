@@ -51,6 +51,14 @@ typedef struct {
     const char *name;
 } BootSlotRegion;
 
+#define BOOTCTL_WATCHDOG_HANDOFF_MAGIC         0x42544F54u
+#define BOOTCTL_WATCHDOG_HANDOFF_MAGIC_SCRATCH 4u
+#define BOOTCTL_WATCHDOG_HANDOFF_SLOT_SCRATCH  5u
+#define BOOTCTL_WATCHDOG_KEEP_ESP_MAGIC        0x4553504Bu
+#define BOOTCTL_WATCHDOG_KEEP_ESP_SCRATCH      6u
+#define BOOTCTL_RECOVERY_MENU_MAGIC            0x4D454E55u
+#define BOOTCTL_RECOVERY_MENU_SCRATCH          7u
+
 void bootctl_defaults(BootControlState *out);
 bool bootctl_load(BootControlState *out);
 bool bootctl_store(const BootControlState *state);

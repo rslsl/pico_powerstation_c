@@ -47,7 +47,6 @@ typedef enum {
     UI_CONFIRM_RESET_STATS = 4,
     UI_CONFIRM_RESET_STATS_FINAL = 5,
     UI_CONFIRM_APPLY_CALIB = 6,
-    UI_CONFIRM_PICO_MODE_REBOOT = 7,
 } UiConfirmAction;
 
 typedef void (*UiSettingsApplyFn)(bool reconfigure_sensors);

@@ -6,6 +6,7 @@
 #include "hardware/gpio.h"
 #include "hardware/uart.h"
 #include "hardware/watchdog.h"
+#include "hardware/structs/watchdog.h"
 #include "pico/stdlib.h"
 
 #include <ctype.h>
@@ -49,6 +50,14 @@ static bool _status_is_transient(const char *status) {
            _streq_icase(status, "WAIT LINK") ||
            _streq_icase(status, "WEB BOOT") ||
            _streq_icase(status, "OTA BOOT");
+}
+
+static bool _boot_keep_esp_requested(void) {
+    return watchdog_hw->scratch[BOOTCTL_WATCHDOG_KEEP_ESP_SCRATCH] == BOOTCTL_WATCHDOG_KEEP_ESP_MAGIC;
+}
+
+static void _boot_keep_esp_clear(void) {
+    watchdog_hw->scratch[BOOTCTL_WATCHDOG_KEEP_ESP_SCRATCH] = 0u;
 }
 
 static float _clampf_local(float v, float lo, float hi) {
@@ -184,6 +193,7 @@ static void _send_settings(EspManager *esp) {
     char buf[384];
     const SystemSettings *cfg = settings_get();
     const EspMode runtime_mode = esp_mode_get(esp);
+    const PicoMode runtime_pico_mode = esp->pico_ota_ready ? PICO_MODE_OTA_SAFE : PICO_MODE_NORMAL;
     snprintf(buf, sizeof(buf),
              "{\"type\":\"settings\",\"capacity_ah\":%.2f,\"vbat_warn_v\":%.2f,\"vbat_cut_v\":%.2f,\"cell_warn_v\":%.3f,"
              "\"cell_cut_v\":%.3f,\"temp_bat_warn_c\":%.1f,\"temp_bat_cut_c\":%.1f,\"temp_inv_warn_c\":%.1f,"
@@ -200,13 +210,14 @@ static void _send_settings(EspManager *esp) {
              (unsigned)cfg->buzzer_preset,
              esp_mode_name(runtime_mode),
              esp_mode_name((EspMode)cfg->esp_mode),
-             pico_mode_name((PicoMode)cfg->pico_mode));
+             pico_mode_name(runtime_pico_mode));
     _uart_write_line(esp, buf);
 }
 
 static void _send_ota_status(EspManager *esp) {
     char buf[448];
     PicoOtaStatus status;
+    const PicoMode runtime_pico_mode = esp->pico_ota_ready ? PICO_MODE_OTA_SAFE : PICO_MODE_NORMAL;
     pico_ota_fill_status(&esp->ota, &status);
     snprintf(buf, sizeof(buf),
              "{\"type\":\"ota\",\"state\":\"%s\",\"running_slot\":\"%s\",\"target_slot\":\"%s\",\"active_slot\":\"%s\","
@@ -224,7 +235,7 @@ static void _send_ota_status(EspManager *esp) {
              status.reboot_pending ? 1u : 0u,
              esp->pico_ota_ready ? 1u : 0u,
              status.version,
-             pico_mode_name((PicoMode)settings_get()->pico_mode),
+             pico_mode_name(runtime_pico_mode),
              status.last_error);
     _uart_write_line(esp, buf);
 }
@@ -638,16 +649,18 @@ void esp_init(EspManager *esp,
               BmsLogger *logger,
               BmsStats *stats,
               EspStoreSettingsFn store_settings) {
+    bool keep_power;
     if (!esp) return;
     memset(esp, 0, sizeof(*esp));
     esp->logger = logger;
     esp->stats = stats;
     esp->store_settings = store_settings;
     pico_ota_init(&esp->ota);
+    keep_power = _boot_keep_esp_requested();
 
     gpio_init(GPIO_ESP_EN);
     gpio_set_dir(GPIO_ESP_EN, GPIO_OUT);
-    gpio_put(GPIO_ESP_EN, ESP_EN_OFF);
+    gpio_put(GPIO_ESP_EN, keep_power ? ESP_EN_ON : ESP_EN_OFF);
 
     uart_init(uart1, ESP_UART_BAUD_HZ);
     gpio_set_function(ESP_UART_TX_PIN, GPIO_FUNC_UART);
@@ -660,7 +673,9 @@ void esp_init(EspManager *esp,
     esp->mode = ESP_MODE_OFF;
     esp->boot_ready = false;
     esp->pico_ota_ready = false;
-    _status_set(esp, "OFF");
+    esp->powered = keep_power;
+    esp->preserve_power = keep_power;
+    _status_set(esp, keep_power ? "HANDOFF BOOT" : "OFF");
     esp_apply_settings(esp, settings_get());
 }
 
@@ -698,9 +713,20 @@ void esp_apply_settings(EspManager *esp, const SystemSettings *cfg) {
     next_mode = (cfg->esp_mode < ESP_MODE_COUNT) ? (EspMode)cfg->esp_mode : ESP_MODE_OFF;
     power_allowed = esp->boot_ready && (now_ms >= esp->boot_release_ms);
     want_power = power_allowed && (next_mode != ESP_MODE_OFF);
+    if (esp->preserve_power && next_mode != ESP_MODE_OFF) {
+        want_power = true;
+    }
 
     esp->mode = (uint8_t)next_mode;
     _power_set(esp, want_power, now_ms);
+    if (esp->preserve_power && next_mode == ESP_MODE_OFF) {
+        esp->preserve_power = false;
+        _boot_keep_esp_clear();
+    }
+    if (esp->preserve_power && power_allowed) {
+        esp->preserve_power = false;
+        _boot_keep_esp_clear();
+    }
 
     if (!want_power) {
         if (next_mode == ESP_MODE_OFF) {
@@ -761,17 +787,10 @@ void esp_update(EspManager *esp, const BatSnapshot *snap, uint32_t now_ms) {
 
     if (pico_ota_should_reboot(&esp->ota, now_ms)) {
         printf("[OTA] rebooting into loader for %s\n", pico_ota_slot_name(esp->ota.target_slot));
-        /* Clear OTA_SAFE so next boot enters NORMAL mode */
-        {
-            SystemSettings cfg;
-            settings_copy(&cfg);
-            if (cfg.pico_mode == PICO_MODE_OTA_SAFE) {
-                cfg.pico_mode = PICO_MODE_NORMAL;
-                settings_store(&cfg);
-                printf("[OTA] pico_mode reset to NORMAL\n");
-            }
-        }
         _status_set(esp, "PICO OTA REBOOT");
+        watchdog_hw->scratch[BOOTCTL_WATCHDOG_HANDOFF_MAGIC_SCRATCH] = BOOTCTL_WATCHDOG_HANDOFF_MAGIC;
+        watchdog_hw->scratch[BOOTCTL_WATCHDOG_HANDOFF_SLOT_SCRATCH] = (uint32_t)esp->ota.target_slot;
+        watchdog_hw->scratch[BOOTCTL_WATCHDOG_KEEP_ESP_SCRATCH] = BOOTCTL_WATCHDOG_KEEP_ESP_MAGIC;
         sleep_ms(20);
         watchdog_reboot(0u, 0u, 50u);
         while (1) {

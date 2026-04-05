@@ -21,9 +21,12 @@
 // ============================================================
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
+#include "pico/bootrom.h"
 #include "pico/stdio_usb.h"
 #include "hardware/i2c.h"
+#include "hardware/address_mapped.h"
 #include "hardware/watchdog.h"
+#include "hardware/structs/watchdog.h"
 #include "hardware/sync.h"
 #include "hardware/timer.h"
 #include <stdio.h>
@@ -40,6 +43,7 @@
 #include "bms/bms_logger.h"
 #include "bms/bms_stats.h"
 #include "bms/bms_ocv.h"
+#include "app/boot_control.h"
 #include "app/power_control.h"
 #include "app/power_sequencer.h"
 #include "app/protection.h"
@@ -51,6 +55,10 @@
 #include "app/session_manager.h"
 #include "app/system_settings.h"
 #include "app/ui.h"
+
+#ifndef POWERSTATION_RECOVERY_SLOT
+#define POWERSTATION_RECOVERY_SLOT 0
+#endif
 
 // в"Ђв"Ђ Globals в"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђ
 TCA9548A     g_tca;
@@ -78,6 +86,10 @@ static bool  g_inv_sensor_absent_logged = false;
 static bool  g_fan_forced_on = false;
 static volatile bool g_core1_ready = false;
 static BootMode g_boot_mode = BOOT_NORMAL;
+static bool g_boot_ota_safe_requested = false;
+#if POWERSTATION_RECOVERY_SLOT
+static bool g_recovery_boot_menu_requested = false;
+#endif
 
 static absolute_time_t t_sensor, t_logic, t_save, t_loop;
 static absolute_time_t t_ui;
@@ -128,6 +140,220 @@ static void _early_console_init(void) {
     printf("\n=== EARLY BOOT %s ===\n", FW_VERSION);
     printf("[DBG] stdio: USB CDC, ESP UART1 on GP%u/GP%u\n", ESP_UART_TX_PIN, ESP_UART_RX_PIN);
 }
+
+static void _boot_buttons_init(void) {
+    gpio_init(BTN_UP_PIN);
+    gpio_set_dir(BTN_UP_PIN, GPIO_IN);
+    gpio_pull_up(BTN_UP_PIN);
+
+    gpio_init(BTN_OK_PIN);
+    gpio_set_dir(BTN_OK_PIN, GPIO_IN);
+    gpio_pull_up(BTN_OK_PIN);
+
+    gpio_init(BTN_DOWN_PIN);
+    gpio_set_dir(BTN_DOWN_PIN, GPIO_IN);
+    gpio_pull_up(BTN_DOWN_PIN);
+}
+
+static BootSlot _compiled_boot_slot(void) {
+#if PICO_OTA_CURRENT_SLOT == 1
+    return BOOT_SLOT_A;
+#elif PICO_OTA_CURRENT_SLOT == 2
+    return BOOT_SLOT_B;
+#else
+    return BOOT_SLOT_NONE;
+#endif
+}
+
+static void _maybe_confirm_running_slot(void) {
+    BootControlState state;
+    BootSlot slot = _compiled_boot_slot();
+    bool loaded;
+    bool changed = false;
+
+    if (slot == BOOT_SLOT_NONE) return;
+
+    loaded = bootctl_load(&state);
+    if (slot == BOOT_SLOT_A && loaded) {
+        return;
+    }
+    if (!loaded) {
+        bootctl_defaults(&state);
+    }
+
+    if (!bootctl_slot_has_bootable_image(&state, slot)) {
+        extern uint8_t __flash_binary_start;
+        extern uint8_t __flash_binary_end;
+        uint32_t image_size = (uint32_t)(&__flash_binary_end - &__flash_binary_start);
+
+        if (!bootctl_stage_update(&state, slot, image_size, 0u, FW_VERSION)) {
+            printf("[BOOT] failed to stage running slot metadata for %s\n",
+                   slot == BOOT_SLOT_A ? "slot-a" : "slot-b");
+            return;
+        }
+        changed = true;
+    }
+
+    if (state.pending_slot == (uint8_t)slot || state.confirmed_slot != (uint8_t)slot) {
+        if (!bootctl_mark_confirmed(&state, slot)) {
+            printf("[BOOT] failed to confirm %s\n",
+                   slot == BOOT_SLOT_A ? "slot-a" : "slot-b");
+            return;
+        }
+        changed = true;
+    }
+
+    if (changed) {
+        if (bootctl_store(&state)) {
+            printf("[BOOT] confirmed %s as bootable\n",
+                   slot == BOOT_SLOT_A ? "slot-a" : "slot-b");
+        } else {
+            printf("[BOOT] failed to store boot metadata for %s\n",
+                   slot == BOOT_SLOT_A ? "slot-a" : "slot-b");
+        }
+    }
+}
+
+#if POWERSTATION_RECOVERY_SLOT
+typedef enum {
+    RECOVERY_BOOT_MENU_OTA = 0,
+    RECOVERY_BOOT_MENU_MAIN = 1,
+    RECOVERY_BOOT_MENU_USB = 2,
+    RECOVERY_BOOT_MENU_COUNT
+} RecoveryBootMenuChoice;
+
+static bool _consume_recovery_boot_menu_request(void) {
+    bool requested = watchdog_hw->scratch[BOOTCTL_RECOVERY_MENU_SCRATCH] == BOOTCTL_RECOVERY_MENU_MAGIC;
+    watchdog_hw->scratch[BOOTCTL_RECOVERY_MENU_SCRATCH] = 0u;
+    return requested;
+}
+
+static bool _slot_vectors_valid_local(BootSlot slot) {
+    const BootSlotRegion *region = bootctl_slot_region(slot);
+    uint32_t vector_addr;
+    uint32_t sp;
+    uint32_t pc;
+    uint32_t pc_min;
+    uint32_t pc_max;
+
+    if (!region) return false;
+
+    vector_addr = XIP_BASE + region->flash_offset + 0x100u;
+    sp = *(const uint32_t *)(uintptr_t)vector_addr;
+    pc = *(const uint32_t *)(uintptr_t)(vector_addr + 4u);
+    pc_min = XIP_BASE + region->flash_offset + 0x100u;
+    pc_max = XIP_BASE + region->flash_offset + region->max_size;
+
+    if (sp < 0x20000000u || sp > 0x20042000u || ((sp & 0x3u) != 0u)) return false;
+    if ((pc & 0x1u) == 0u || pc < pc_min || pc >= pc_max) return false;
+    return true;
+}
+
+static void _draw_recovery_boot_menu(int selected, bool main_available, const char *status_text, uint16_t status_col) {
+    static const char *k_titles[RECOVERY_BOOT_MENU_COUNT] = {
+        "PICO OTA",
+        "BOOT MAIN",
+        "USB BOOTSEL",
+    };
+    static const char *k_notes[RECOVERY_BOOT_MENU_COUNT] = {
+        "Stay in recovery and wait for WiFi upload",
+        "Reboot through loader into main slot B",
+        "Enter RP2040 USB flashing mode",
+    };
+
+    disp_fill(&g_disp, D_BG);
+    disp_header(&g_disp, "BOOT MENU", "RECOVERY");
+    disp_text_center_safe(&g_disp, 34, "DOWN HELD ON POWER-ON", D_SUBTEXT);
+
+    for (int i = 0; i < RECOVERY_BOOT_MENU_COUNT; ++i) {
+        const int y = 56 + i * 54;
+        const bool active = (i == selected);
+        const bool enabled = (i != RECOVERY_BOOT_MENU_MAIN) || main_available;
+        const uint16_t frame_col = active ? D_ACCENT : D_GRAY;
+        const uint16_t fill_col = active ? 0x1147u : 0x08A6u;
+        const uint16_t text_col = enabled ? (active ? D_WHITE : D_TEXT) : D_SUBTEXT;
+
+        disp_fill_rect(&g_disp, 12, y, 216, 42, fill_col);
+        disp_rect(&g_disp, 12, y, 216, 42, frame_col);
+        disp_text(&g_disp, 20, y + 8, k_titles[i], text_col);
+        disp_text(&g_disp, 20, y + 22, k_notes[i], enabled ? D_SUBTEXT : D_RED);
+    }
+
+    if (status_text && status_text[0]) {
+        disp_fill_rect(&g_disp, 12, 220, 216, 22, 0x08A6u);
+        disp_rect(&g_disp, 12, 220, 216, 22, status_col);
+        disp_text_center_safe(&g_disp, 227, status_text, status_col);
+    }
+
+    disp_footer(&g_disp, "UP/DN=SELECT", "OK=START");
+    disp_flush_sync(&g_disp);
+}
+
+static void _reboot_to_requested_slot(BootSlot slot) {
+    watchdog_hw->scratch[BOOTCTL_WATCHDOG_HANDOFF_MAGIC_SCRATCH] = BOOTCTL_WATCHDOG_HANDOFF_MAGIC;
+    watchdog_hw->scratch[BOOTCTL_WATCHDOG_HANDOFF_SLOT_SCRATCH] = (uint32_t)slot;
+    sleep_ms(20);
+    watchdog_reboot(0u, 0u, 50u);
+    while (1) {
+        tight_loop_contents();
+    }
+}
+
+static RecoveryBootMenuChoice _run_recovery_boot_menu(void) {
+    const uint8_t pins[3] = { BTN_UP_PIN, BTN_OK_PIN, BTN_DOWN_PIN };
+    bool prev[3] = { false, false, false };
+    uint32_t last_ms[3] = { 0u, 0u, 0u };
+    int selected = RECOVERY_BOOT_MENU_OTA;
+    bool dirty = true;
+    bool main_available = _slot_vectors_valid_local(BOOT_SLOT_B);
+    char status_text[40];
+    uint16_t status_col = D_SUBTEXT;
+
+    snprintf(status_text, sizeof(status_text),
+             "%s",
+             main_available ? "SELECT RECOVERY ACTION" : "MAIN SLOT B NOT AVAILABLE");
+
+    while (1) {
+        uint32_t now = to_ms_since_boot(get_absolute_time());
+
+        if (dirty) {
+            _draw_recovery_boot_menu(selected, main_available, status_text, status_col);
+            dirty = false;
+        }
+
+        for (int i = 0; i < 3; ++i) {
+            bool pressed = (gpio_get(pins[i]) == 0);
+            if (pressed != prev[i] && (now - last_ms[i]) >= BTN_DEBOUNCE_MS) {
+                prev[i] = pressed;
+                last_ms[i] = now;
+                if (!pressed) continue;
+
+                if (i == 0) {
+                    selected = (selected + RECOVERY_BOOT_MENU_COUNT - 1) % RECOVERY_BOOT_MENU_COUNT;
+                    snprintf(status_text, sizeof(status_text), "%s", "SELECT RECOVERY ACTION");
+                    status_col = D_SUBTEXT;
+                    dirty = true;
+                } else if (i == 2) {
+                    selected = (selected + 1) % RECOVERY_BOOT_MENU_COUNT;
+                    snprintf(status_text, sizeof(status_text), "%s", "SELECT RECOVERY ACTION");
+                    status_col = D_SUBTEXT;
+                    dirty = true;
+                } else {
+                    if (selected == RECOVERY_BOOT_MENU_MAIN && !main_available) {
+                        snprintf(status_text, sizeof(status_text), "%s", "MAIN SLOT B IS EMPTY");
+                        status_col = D_RED;
+                        dirty = true;
+                    } else {
+                        return (RecoveryBootMenuChoice)selected;
+                    }
+                }
+            }
+        }
+
+        sleep_ms(30);
+    }
+}
+#endif
 
 static void _snapshot_update(void) {
     uint32_t s = spin_lock_blocking(g_bat_lock);
@@ -216,6 +442,7 @@ static void _fan_control(void) {
 }
 
 // в"Ђв"Ђ Startup validation в"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђ
+#if !POWERSTATION_RECOVERY_SLOT
 static const char *_diag_status(bool ok, bool warn_only) {
     if (ok) return "OK";
     return warn_only ? "WARN" : "FAIL";
@@ -225,6 +452,7 @@ static uint16_t _diag_color(bool ok, bool warn_only) {
     if (ok) return D_GREEN;
     return warn_only ? D_ORANGE : D_RED;
 }
+#endif
 
 static void _bootdiag_draw_progress(const char *title, const char *line1, const char *line2) {
     disp_fill(&g_disp, D_BG);
@@ -236,6 +464,7 @@ static void _bootdiag_draw_progress(const char *title, const char *line1, const 
     disp_flush_sync(&g_disp);
 }
 
+#if !POWERSTATION_RECOVERY_SLOT
 static void _bootdiag_draw_report(const StartupDiagReport *rep, uint32_t timeout_left_ms) {
     char buf[48];
     int y = 22;
@@ -284,19 +513,20 @@ static void _bootdiag_draw_report(const StartupDiagReport *rep, uint32_t timeout
     disp_text(&g_disp, 4, y, buf, D_TEXT);
 
     if (rep->startup_ok) {
-        snprintf(buf, sizeof(buf), "OK=run DOWN=diag %lus", (unsigned long)(timeout_left_ms / 1000u));
+        snprintf(buf, sizeof(buf), "OK=run auto %lus", (unsigned long)(timeout_left_ms / 1000u));
     } else {
         snprintf(buf, sizeof(buf), "OK=diag auto %lus", (unsigned long)(timeout_left_ms / 1000u));
     }
     disp_footer(&g_disp, buf, NULL);
     disp_flush_sync(&g_disp);
 }
+#endif
 
+#if !POWERSTATION_RECOVERY_SLOT
 static bool _bootdiag_wait_confirm(const StartupDiagReport *rep, bool *force_diag_ui) {
     uint32_t confirm_ms = rep->startup_ok ? 3000u : BOOT_DIAG_CONFIRM_MS;
     uint32_t start_ms = to_ms_since_boot(get_absolute_time());
     bool ok_prev = false;
-    bool dn_prev = false;
 
     while (1) {
         uint32_t now_ms = to_ms_since_boot(get_absolute_time());
@@ -305,13 +535,8 @@ static bool _bootdiag_wait_confirm(const StartupDiagReport *rep, bool *force_dia
         _bootdiag_draw_report(rep, timeout_left);
 
         bool ok_now = (gpio_get(BTN_OK_PIN) == 0);
-        bool dn_now = (gpio_get(BTN_DOWN_PIN) == 0);
         if (ok_now && !ok_prev) {
             *force_diag_ui = !rep->startup_ok;
-            return true;
-        }
-        if (dn_now && !dn_prev) {
-            *force_diag_ui = true;
             return true;
         }
         if (elapsed >= confirm_ms) {
@@ -320,10 +545,10 @@ static bool _bootdiag_wait_confirm(const StartupDiagReport *rep, bool *force_dia
         }
 
         ok_prev = ok_now;
-        dn_prev = dn_now;
         sleep_ms(40);
     }
 }
+#endif
 
 static bool _startup_validate(StartupDiagReport *rep) {
     printf("[INIT] startup validation...\n");
@@ -547,7 +772,17 @@ int main(void) {
     // First instruction: keep relays OFF, wait bootstrap delay, then latch SYSTEM_HOLD.
     pseq_latch(&g_pseq);
 #endif
+    _boot_buttons_init();
     _early_console_init();
+#if POWERSTATION_RECOVERY_SLOT
+    g_recovery_boot_menu_requested = _consume_recovery_boot_menu_request();
+    g_boot_ota_safe_requested = !g_recovery_boot_menu_requested;
+    printf("[BOOT] recovery slot build -> %s\n",
+           g_recovery_boot_menu_requested ? "boot menu requested" : "OTA recovery forced");
+#else
+    g_boot_ota_safe_requested = false;
+    printf("[BOOT] main slot build -> normal loader-controlled boot\n");
+#endif
 #if DEBUG_USB_BRINGUP
     printf("[SEQ] DEBUG_USB_BRINGUP=1: pseq_latch skipped, relays forced OFF\n");
 #else
@@ -558,15 +793,32 @@ int main(void) {
     // в"Ђв"Ђ 2. INIT в"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђ
     _init_all();
 
+#if POWERSTATION_RECOVERY_SLOT
+    if (g_recovery_boot_menu_requested) {
+        RecoveryBootMenuChoice boot_choice = _run_recovery_boot_menu();
+        if (boot_choice == RECOVERY_BOOT_MENU_MAIN) {
+            printf("[BOOT] recovery menu -> reboot to main slot B\n");
+            _reboot_to_requested_slot(BOOT_SLOT_B);
+        }
+        if (boot_choice == RECOVERY_BOOT_MENU_USB) {
+            printf("[BOOT] recovery menu -> BOOTSEL\n");
+            reset_usb_boot(0u, 0u);
+        }
+        g_boot_ota_safe_requested = true;
+        printf("[BOOT] recovery menu -> Pico OTA recovery\n");
+    }
+#endif
+
     // в"Ђв"Ђ 3. VALIDATION в"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђ
     StartupDiagReport diag = {0};
     bool startup_ok = _startup_validate(&diag);
     bool force_diag_ui = false;
+#if !POWERSTATION_RECOVERY_SLOT
     _bootdiag_wait_confirm(&diag, &force_diag_ui);
+#endif
     float soc_ocv   = diag.soc_ocv;
-    const SystemSettings *boot_cfg = settings_get();
     BootMode mode   = pseq_resolve(&g_pseq, startup_ok, soc_ocv,
-                                   boot_cfg->pico_mode == PICO_MODE_OTA_SAFE);
+                                   g_boot_ota_safe_requested);
     g_boot_mode = mode;
 
     _snapshot_update();
@@ -646,6 +898,7 @@ int main(void) {
     } else {
         printf("[BOOT] core1 not ready, boot log skipped\n");
     }
+    _maybe_confirm_running_slot();
     printf("[BOOT] done\n");
 
     // -- Minimal OTA loop (no sensors/BMS/protection/fan/inverter) --

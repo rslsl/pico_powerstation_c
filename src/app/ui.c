@@ -94,10 +94,6 @@ static EspMode _step_esp_mode(EspMode mode, int dir) {
     return (EspMode)next;
 }
 
-static PicoMode _toggle_pico_mode(PicoMode mode) {
-    return (mode == PICO_MODE_OTA_SAFE) ? PICO_MODE_NORMAL : PICO_MODE_OTA_SAFE;
-}
-
 static CalSensor _clampf_cal_sensor(uint8_t sensor) {
     return (sensor < CAL_SENSOR_COUNT) ? (CalSensor)sensor : CAL_SENSOR_DISCHARGE;
 }
@@ -390,7 +386,7 @@ static int _menu_len(const UI *ui, UiState s) {
         case S_CAL_ITEM: return _cal_menu_count(_clampf_cal_sensor(ui->cal_sensor));
         case S_DATA_CFG: return 3;
         case S_ADVANCED: return 5;
-        case S_ESP_CFG:  return 2;
+        case S_ESP_CFG:  return 1;
         default:         return 1;
     }
 }
@@ -582,30 +578,6 @@ static void _confirm_apply(UI *ui) {
                 watchdog_reboot(0u, 0u, 10u);
                 while (1) tight_loop_contents();
             }
-        }
-    } else if ((UiConfirmAction)ui->confirm_kind == UI_CONFIRM_PICO_MODE_REBOOT) {
-        SystemSettings cfg;
-        PicoMode next_mode;
-
-        settings_copy(&cfg);
-        next_mode = _toggle_pico_mode((PicoMode)cfg.pico_mode);
-        cfg.pico_mode = (uint8_t)next_mode;
-
-        if (!settings_store(&cfg)) {
-            ui_toast(ui, "Pico mode save failed");
-        } else {
-            ui->confirm_active = false;
-            ui->confirm_kind = UI_CONFIRM_NONE;
-            ui->confirm_arg = -1;
-            ui->edit_active = false;
-            _rs_publish(ui);
-            ui_toast(ui,
-                     next_mode == PICO_MODE_OTA_SAFE
-                         ? "Rebooting to OTA safe"
-                         : "Rebooting to normal mode");
-            sleep_ms(120);
-            watchdog_reboot(0u, 0u, 10u);
-            while (1) tight_loop_contents();
         }
     }
 
@@ -814,6 +786,10 @@ void ui_set_startup_ok(UI *ui, bool ok) {
 
 void ui_set_state(UI *ui, UiState s) {
     ui->state = s;
+    if (s == S_OTA) {
+        ui->screensaver_active = false;
+        ui->last_activity_ms = to_ms_since_boot(get_absolute_time());
+    }
     _rs_publish(ui);
 }
 
@@ -849,8 +825,9 @@ static void _anim_tick(UI *ui, uint32_t now) {
     bool charging = ui->pwr && pwr_is_charger_present(ui->pwr) && ui->snap &&
                     ui->snap->is_charging && ui->snap->i_net < -0.15f;
     uint32_t idle_ms = now - ui->last_activity_ms;
-    bool want_saver = (charging && idle_ms >= UI_IDLE_SCREENSAVER_MS) ||
-                      (!charging && idle_ms >= UI_IDLE_DISCHARGE_SAVER_MS);
+    bool want_saver = (ui->state != S_OTA) &&
+                      ((charging && idle_ms >= UI_IDLE_SCREENSAVER_MS) ||
+                       (!charging && idle_ms >= UI_IDLE_DISCHARGE_SAVER_MS));
     if (want_saver != ui->screensaver_active) {
         ui->screensaver_active = want_saver;
         ui->dirty = true;
@@ -974,12 +951,8 @@ static void _click(UI *ui) {
             break;
         }
         case S_ESP_CFG:
-            if (ui->cur[S_ESP_CFG] == 0) {
-                ui->edit_active = true;
-                _rs_publish(ui);
-            } else {
-                _confirm_open(ui, UI_CONFIRM_PICO_MODE_REBOOT, 0);
-            }
+            ui->edit_active = true;
+            _rs_publish(ui);
             break;
         case S_EVENTS:
         case S_HISTORY:
@@ -1108,15 +1081,6 @@ void ui_poll(UI *ui) {
                 ui->poweroff_arm_ms = now;
             }
             if (ui->pseq) {
-                /* If in OTA_SAFE, clear setting so next boot is NORMAL */
-                if (ui->state == S_OTA) {
-                    SystemSettings cfg;
-                    settings_copy(&cfg);
-                    if (cfg.pico_mode == PICO_MODE_OTA_SAFE) {
-                        cfg.pico_mode = PICO_MODE_NORMAL;
-                        settings_store(&cfg);
-                    }
-                }
                 printf("[UI] user power-off\n");
                 pseq_user_poweroff(ui->pseq, ui->buz);
             }
@@ -1797,15 +1761,10 @@ static void _draw_confirm_overlay(Display *d, const FullUiSnapshot *rs) {
     } else if ((UiConfirmAction)rs->confirm_kind == UI_CONFIRM_APPLY_CALIB) {
         snprintf(prompt, sizeof(prompt), "APPLY %s?", _cal_target_label(_clampf_cal_target(rs->cal_target)));
         lines[0] = prompt;
-    } else if ((UiConfirmAction)rs->confirm_kind == UI_CONFIRM_PICO_MODE_REBOOT) {
-        lines[0] = ((PicoMode)rs->settings.pico_mode == PICO_MODE_OTA_SAFE)
-            ? "REBOOT TO NORMAL MODE?"
-            : "REBOOT TO OTA SAFE?";
     } else {
         lines[0] = "CONFIRM ACTION?";
     }
-    if ((UiConfirmAction)rs->confirm_kind == UI_CONFIRM_APPLY_CALIB ||
-        (UiConfirmAction)rs->confirm_kind == UI_CONFIRM_PICO_MODE_REBOOT) {
+    if ((UiConfirmAction)rs->confirm_kind == UI_CONFIRM_APPLY_CALIB) {
         lines[1] = "OK=SAVE+REBOOT";
         lines[2] = "UP/DN=CANCEL";
     } else {
@@ -3056,24 +3015,21 @@ static void _render_advanced_ref(Display *d, const FullUiSnapshot *rs) {
 
 static void _render_esp_cfg_ref(Display *d, const FullUiSnapshot *rs) {
     const char *mode_text = esp_mode_name((EspMode)rs->settings.esp_mode);
-    const char *pico_mode_text = pico_mode_name((PicoMode)rs->settings.pico_mode);
-    const bool pico_ota_safe = ((PicoMode)rs->settings.pico_mode == PICO_MODE_OTA_SAFE);
-    const char *effective_esp = pico_ota_safe ? "OTA (FORCED)" : mode_text;
+    const char *effective_esp = esp_mode_name((EspMode)rs->esp_mode);
     const char *power_text = rs->esp_powered ? "ON" : "OFF";
     const char *link_text = rs->esp_link_up ? "ONLINE" : "WAIT";
     uint16_t mode_col = (rs->settings.esp_mode == ESP_MODE_OFF) ? D_SUBTEXT :
                         (rs->settings.esp_mode == ESP_MODE_OTA) ? UI_NEON_AMB : D_GREEN;
-    uint16_t pico_col = pico_ota_safe ? UI_NEON_AMB : D_TEXT;
-    uint16_t effective_col = pico_ota_safe ? UI_NEON_AMB : mode_col;
+    uint16_t effective_col = (rs->esp_mode == ESP_MODE_OFF) ? D_SUBTEXT :
+                             (rs->esp_mode == ESP_MODE_OTA) ? UI_NEON_AMB : D_GREEN;
     uint16_t link_col = rs->esp_link_up ? D_GREEN : D_ORANGE;
     const char *note_text = rs->edit_active ? "UP/DN CHANGES ESP MODE" :
-                            (rs->cur[S_ESP_CFG] == 0) ? "OK TO EDIT ESP MODE" :
-                            (pico_ota_safe ? "OK TO REBOOT NORMAL" : "OK TO REBOOT OTA SAFE");
+                            "BOOT MENU: HOLD DOWN WHILE POWERING ON";
 
     _draw_grid_background(d);
-    _draw_screen_title(d, "WIRELESS", pico_ota_safe ? "PICO OTA SAFE" : NULL);
+    _draw_screen_title(d, "WIRELESS", NULL);
     _draw_list_card(d, 12, 40, 216, 24, "ESP MODE", mode_text, mode_col, rs->cur[S_ESP_CFG] == 0);
-    _draw_list_card(d, 12, 68, 216, 24, "PICO MODE", pico_mode_text, pico_col, rs->cur[S_ESP_CFG] == 1);
+    _draw_list_card(d, 12, 68, 216, 24, "BOOT MENU", "HOLD DOWN ON POWER-ON", UI_NEON_AMB, false);
     _draw_list_card(d, 12, 96, 216, 20, "ESP ACTIVE", effective_esp, effective_col, false);
     _draw_list_card(d, 12, 120, 216, 20, "POWER", power_text,
                     rs->esp_powered ? D_GREEN : D_SUBTEXT, false);

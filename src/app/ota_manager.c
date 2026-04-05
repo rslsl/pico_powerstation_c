@@ -116,7 +116,6 @@ BootSlot pico_ota_running_slot(void) {
 BootSlot pico_ota_target_slot(void) {
     BootSlot running = pico_ota_running_slot();
     if (running == BOOT_SLOT_A) return BOOT_SLOT_B;
-    if (running == BOOT_SLOT_B) return BOOT_SLOT_A;
     return BOOT_SLOT_NONE;
 }
 

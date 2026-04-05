@@ -23,6 +23,7 @@ typedef struct {
     bool link_up;
     bool boot_ready;
     bool pico_ota_ready;
+    bool preserve_power;
     uint8_t mode;
 
     uint32_t boot_release_ms;
