@@ -14,6 +14,8 @@ typedef struct {
     uint32_t soc_sample_ms;
     uint32_t soc_stable_since_ms;
     float soc_sample;
+    uint16_t last_skip_reason;
+    uint32_t last_skip_log_ms;
 } SaveManager;
 
 void save_manager_init(SaveManager *mgr, const Battery *bat, uint32_t boot_ms);

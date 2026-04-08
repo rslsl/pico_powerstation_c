@@ -283,6 +283,21 @@ void stats_record_discharge_session(BmsStats *s,
     if (f->discharge_session_count < UINT16_MAX) {
         f->discharge_session_count++;
     }
+    f->discharge_session_count_total++;
+
+    /* EMA for average discharge session Wh */
+    if (f->avg_discharge_session_wh <= 0.0f)
+        f->avg_discharge_session_wh = session_wh;
+    else
+        f->avg_discharge_session_wh =
+            (1.0f - STATS_PRED_EMA_ALPHA) * f->avg_discharge_session_wh +
+            STATS_PRED_EMA_ALPHA * session_wh;
+
+    if (session_wh > f->max_discharge_session_wh)
+        f->max_discharge_session_wh = session_wh;
+
+    if (dod_frac > f->deepest_dod_frac)
+        f->deepest_dod_frac = dod_frac;
 
     if (dod_frac >= 0.30f && dod_frac <= 0.95f &&
         session_ah > 0.5f && q_measured_ah > 0.1f && v_nominal > 0.1f) {
@@ -304,6 +319,36 @@ void stats_record_discharge_session(BmsStats *s,
         }
     }
 
+    s->dirty = true;
+}
+
+void stats_inc_brownout(BmsStats *s) {
+    if (!s || !s->initialized) return;
+    s->flash.brownout_count++;
+    s->dirty = true;
+}
+
+void stats_inc_save_skip(BmsStats *s) {
+    if (!s || !s->initialized) return;
+    s->flash.save_skip_count++;
+    s->dirty = true;
+}
+
+void stats_inc_sensor_fault(BmsStats *s) {
+    if (!s || !s->initialized) return;
+    s->flash.sensor_fault_count++;
+    s->dirty = true;
+}
+
+void stats_inc_charge_session(BmsStats *s, float session_wh) {
+    if (!s || !s->initialized) return;
+    s->flash.charge_session_count++;
+    if (s->flash.avg_charge_session_wh <= 0.0f)
+        s->flash.avg_charge_session_wh = session_wh;
+    else
+        s->flash.avg_charge_session_wh =
+            (1.0f - STATS_PRED_EMA_ALPHA) * s->flash.avg_charge_session_wh +
+            STATS_PRED_EMA_ALPHA * session_wh;
     s->dirty = true;
 }
 

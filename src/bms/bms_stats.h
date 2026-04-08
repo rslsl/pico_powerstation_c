@@ -48,7 +48,21 @@ typedef struct __attribute__((packed)) {
     uint16_t discharge_session_count;
     float    peukert_calibrated;
 
-    uint8_t  _pad[145];
+    // Extended lifetime counters (v2 event log)
+    uint32_t charge_session_count;
+    uint32_t discharge_session_count_total;
+    float    avg_charge_session_wh;
+    float    avg_discharge_session_wh;
+    float    max_discharge_session_wh;
+    float    deepest_dod_frac;
+    uint32_t brownout_count;
+    uint32_t save_skip_count;
+    uint32_t sensor_fault_count;
+    float    fan_runtime_h;
+    float    dc_out_runtime_h;
+    float    usb_pd_runtime_h;
+
+    uint8_t  _pad[97];
 } StatsFlash;
 _Static_assert(sizeof(StatsFlash) <= 4096 - 16,
                "StatsFlash too large for A/B sector");
@@ -99,3 +113,9 @@ void  stats_record_discharge_session(BmsStats *s,
                                      float v_nominal);
 float stats_predictor_baseline_power_w(const BmsStats *s);
 float stats_predictor_peukert        (const BmsStats *s);
+
+// Increment extended counters
+void stats_inc_brownout(BmsStats *s);
+void stats_inc_save_skip(BmsStats *s);
+void stats_inc_sensor_fault(BmsStats *s);
+void stats_inc_charge_session(BmsStats *s, float session_wh);

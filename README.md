@@ -1,4 +1,4 @@
-# Pico PowerStation C
+# PowerStation OTA ESP
 
 [Українська](#українська) | [English](#english)
 
@@ -18,197 +18,178 @@
 
 ## Українська
 
-Прошивка для Raspberry Pi Pico / RP2040 для портативної power station з моніторингом батареї, захисною логікою, UI на ST7789 та модульною C/C++ кодовою базою.
+`PowerStation OTA ESP` — це актуальний репозиторій прошивки для системи на `RP2040 / Pico` + `ESP32-S2`.
 
-Проєкт містить:
+Поточна архітектура:
 
-- BMS-логіку з оцінкою SOC/SOH
-- драйвери сенсорів і периферії для RP2040
-- UI для дисплея ST7789 240x280
-- меню налаштувань і калібрування датчиків
-- допоміжні build-цілі для перевірки дисплея та нового pinout
+- `loader`
+- `slot A = recovery`
+- `slot B = main`
 
-## Короткий Changelog
+### Що робить система
 
-### v1.2.0
+Pico:
 
-- виправлено зависання в `Boot Diagnostics` під час ранньої міграції `SOH`
-- додано захист від раннього запису в flash: `startup holdoff` і фаза стабілізації `SOC`
-- додано відсіювання невалідних даних перед записом `SOH` і `Stats` у flash
-- покращено екран калібровки: усереднення вимірів, мінімальний струм для калібрування шунта, індикатор похибки
-- стабілізовано ETA/SOH, інтеграцію `Rint` в EKF, OCV таблицю та захисну логіку
+- читає датчики струму, напруги, температури й осередків
+- виконує BMS-логіку, захисти, керування виходами та сесіями
+- веде статистику, налаштування й event log у flash
+- керує локальним UI на ST7789
+- приймає OTA-оновлення в `slot B`
 
-## Ключові особливості
+ESP32-S2 bridge:
 
-- Двоядерна архітектура: Core0 виконує опитування сенсорів, BMS-логіку, захист і UI polling, а Core1 обслуговує дисплей.
-- Модульна структура коду з поділом на `drivers`, `bms` і `app`.
-- Конвеєр відмальовування ST7789 з DMA-орієнтованим підходом.
-- Калібрування струму та напруги за еталонним виміром через меню, зі збереженням параметрів у flash.
-- Підтримка як основної firmware-цілі, так і окремих апаратних smoke test.
+- спілкується з Pico по UART
+- піднімає web UI і сторінку Pico OTA
+- кешує telemetry, stats, settings, ota state і slices event log
+- підтримує OTA для себе
+- приймає `pico_powerstation_slot_b.bin`, зберігає його в SPIFFS і передає в Pico
+- синхронізує час через NTP і передає epoch у Pico
 
-## Апаратний стек
+### Основні робочі папки
 
-- Raspberry Pi Pico / RP2040
-- ST7789 240x280 display
-- TCA9548A I2C multiplexer
-- INA226 current / voltage monitors
-- INA3221 multi-channel cell monitor
-- LM75A temperature sensors
+- `src/` — активний код Pico / RP2040
+- `esp32_s2_bridge/` — активний код ESP32-S2
+- `OTA_ready/` — актуальні готові файли для прошивки
+- `docs/` — документація
+- `tools/` — скрипти для combined UF2
 
-## Структура репозиторію
+### Актуальні артефакти
 
-```text
-pico_powerstation_c/
-|- CMakeLists.txt
-|- pico_sdk_import.cmake
-|- memmap_16mb.ld
-|- src/
-|  |- app/          application logic, UI, power control, protection, buzzer
-|  |- bms/          battery algorithms, prediction, logging, flash NVM
-|  |- drivers/      hardware drivers
-|  `- third_party/  ST7789 support library
-|- ui_assets/       PNG assets, RGB565 headers, previews
-|- docs/images/     README screenshots
-|- tmp/pdfs/        helper script for PDF generation
-`- BUILD.md         detailed build notes
-```
+- `OTA_ready/combined_loader_recovery_main.uf2` — повна Pico-прошивка для відновлення
+- `OTA_ready/pico_powerstation_slot_b.bin` — OTA-оновлення Pico main slot
+- `OTA_ready/esp32_s2_bridge.bin` — актуальна прошивка ESP32-S2 bridge
 
-## Основні цілі
+### Швидкий старт
 
-- `pico_powerstation` - основна firmware-ціль
-- `periph_test_new_pinout` - smoke test периферії для нового pinout
-- `main_cpp_display_test` - smoke test дисплея ST7789
-
-## Збірка
-
-Потрібно:
-
-- Raspberry Pi Pico SDK 2.x
-- CMake 3.13+
-- ARM GCC toolchain (`arm-none-eabi-gcc`)
-- Python 3 для Pico SDK scripts
-
-Типовий сценарій збірки:
+Збірка Pico:
 
 ```bash
-git clone https://github.com/rslsl/pico_powerstation_c.git
-cd pico_powerstation_c
-
-# Make sure PICO_SDK_PATH points to your pico-sdk checkout
-mkdir build
-cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . -j
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
 ```
 
-Основний результат:
+Збірка ESP:
 
-```text
-build/pico_powerstation.uf2
+```bash
+cd esp32_s2_bridge
+python -m platformio run
 ```
 
-Для детальніших нотаток по збірці, flash layout і запуску дивись `BUILD.md`.
+### Основні файли для змін
 
-## Примітки
+Pico:
 
-- `memmap_16mb.ld` доступний для збірок під 16 MB flash.
+- `src/main.c`
+- `src/main_ota_loader.c`
+- `src/config.h`
+- `src/app/ui.c`
+- `src/app/esp_manager.c`
+- `src/app/ota_manager.c`
+- `src/bms/battery.c`
+- `src/bms/bms_logger.c`
 
----
+ESP:
+
+- `esp32_s2_bridge/src/main.cpp`
+- `esp32_s2_bridge/src/web_ui.h`
+- `esp32_s2_bridge/src/pico_ota_ui.h`
+
+### Де читати далі
+
+- `BUILD.md` — повна інструкція зі збірки
+- `PROJECT_STRUCTURE.md` — швидка карта файлів
+- `docs/FLASHING_GUIDE_UK.md` — інструкція з прошивки
+- `docs/CODE_DESCRIPTION_UK.md` — опис системи
+- `workplan.md` — поточний контекст і внесені зміни
 
 ## English
 
-Raspberry Pi Pico / RP2040 firmware for a portable power station with battery monitoring, protection logic, an ST7789 UI, and a modular C/C++ codebase.
+`PowerStation OTA ESP` is the current firmware repository for the `RP2040 / Pico` + `ESP32-S2` system.
 
-The project includes:
+Current runtime architecture:
 
-- BMS logic with SOC/SOH estimation
-- sensor and peripheral drivers for the RP2040 platform
-- a 240x280 ST7789-based UI
-- runtime settings and sensor calibration menus
-- auxiliary build targets for display and pinout smoke tests
+- `loader`
+- `slot A = recovery`
+- `slot B = main`
 
-## Short Changelog
+### What the system does
 
-### v1.2.0
+Pico:
 
-- fixed boot hangs caused by early `SOH` migration during `Boot Diagnostics`
-- added flash save protection with `startup holdoff` and an initial `SOC` settling phase
-- added invalid-data filtering before writing `SOH` and `Stats` payloads to flash
-- improved the calibration screen with measurement averaging, a minimum-current guard, and an error indicator
-- hardened ETA/SOH behavior, `Rint` integration into EKF, the OCV table, and protection logic
+- reads current, voltage, temperature, and cell telemetry
+- runs BMS, protection, output control, and session logic
+- stores settings, stats, and event log data in flash
+- drives the local ST7789 UI
+- receives OTA updates into `slot B`
 
-## Highlights
+ESP32-S2 bridge:
 
-- Dual-core layout: Core0 handles sensing, BMS logic, protection, and UI polling; Core1 is used for display work.
-- Modular source tree split into `drivers`, `bms`, and `app`.
-- ST7789 display pipeline with DMA-oriented rendering flow.
-- Reference-based current and voltage calibration flow with persistent flash storage.
-- Support for both the main firmware image and small standalone hardware tests.
+- communicates with Pico over UART
+- serves the web dashboard and Pico OTA page
+- caches telemetry, stats, settings, OTA state, and event log slices
+- supports OTA for the ESP itself
+- accepts `pico_powerstation_slot_b.bin`, stages it in SPIFFS, and transfers it to Pico
+- syncs time via NTP and forwards epoch time to Pico
 
-## Hardware Stack
+### Main working folders
 
-- Raspberry Pi Pico / RP2040
-- ST7789 240x280 display
-- TCA9548A I2C multiplexer
-- INA226 current / voltage monitors
-- INA3221 multi-channel cell monitor
-- LM75A temperature sensors
+- `src/` - active Pico / RP2040 code
+- `esp32_s2_bridge/` - active ESP32-S2 bridge code
+- `OTA_ready/` - current ready-to-flash artifacts
+- `docs/` - documentation
+- `tools/` - helper scripts for combined UF2 generation
 
-## Repository Layout
+### Current artifacts
 
-```text
-pico_powerstation_c/
-|- CMakeLists.txt
-|- pico_sdk_import.cmake
-|- memmap_16mb.ld
-|- src/
-|  |- app/          application logic, UI, power control, protection, buzzer
-|  |- bms/          battery algorithms, prediction, logging, flash NVM
-|  |- drivers/      hardware drivers
-|  `- third_party/  ST7789 support library
-|- ui_assets/       PNG assets, RGB565 headers, previews
-|- docs/images/     README screenshots
-|- tmp/pdfs/        helper script for PDF generation
-`- BUILD.md         detailed build notes
-```
+- `OTA_ready/combined_loader_recovery_main.uf2` - full Pico recovery image
+- `OTA_ready/pico_powerstation_slot_b.bin` - Pico OTA image for the main slot
+- `OTA_ready/esp32_s2_bridge.bin` - current ESP32-S2 bridge firmware
 
-## Main Targets
+### Quick start
 
-- `pico_powerstation` - main firmware target
-- `periph_test_new_pinout` - peripheral smoke test for the new pinout
-- `main_cpp_display_test` - ST7789 display smoke test
-
-## Build
-
-Requirements:
-
-- Raspberry Pi Pico SDK 2.x
-- CMake 3.13+
-- ARM GCC toolchain (`arm-none-eabi-gcc`)
-- Python 3 for Pico SDK scripts
-
-Typical build flow:
+Build Pico:
 
 ```bash
-git clone https://github.com/rslsl/pico_powerstation_c.git
-cd pico_powerstation_c
-
-# Make sure PICO_SDK_PATH points to your pico-sdk checkout
-mkdir build
-cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . -j
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
 ```
 
-Primary output:
+Build ESP:
 
-```text
-build/pico_powerstation.uf2
+```bash
+cd esp32_s2_bridge
+python -m platformio run
 ```
 
-For more detailed notes, flash layout details, and build guidance, see `BUILD.md`.
+### Main files to edit
+
+Pico:
+
+- `src/main.c`
+- `src/main_ota_loader.c`
+- `src/config.h`
+- `src/app/ui.c`
+- `src/app/esp_manager.c`
+- `src/app/ota_manager.c`
+- `src/bms/battery.c`
+- `src/bms/bms_logger.c`
+
+ESP:
+
+- `esp32_s2_bridge/src/main.cpp`
+- `esp32_s2_bridge/src/web_ui.h`
+- `esp32_s2_bridge/src/pico_ota_ui.h`
+
+### Read next
+
+- `BUILD.md` - full build guide
+- `PROJECT_STRUCTURE.md` - quick file map
+- `docs/FLASHING_GUIDE_EN.md` - flashing guide
+- `docs/CODE_DESCRIPTION_EN.md` - system description
+- `workplan.md` - current context and recent changes
 
 ## Notes
 
-
-- `memmap_16mb.ld` is available for 16 MB flash builds when needed.
+- `pico_powerstation` still builds as a monolithic image, but the working OTA architecture is `loader + slot A + slot B`.
+- Event Log transport currently uses UART slices, with Pico reporting the actual transmitted row count and ESP requesting batches of `8`.
+- `POWERSTATION_FLASH_16MB` still exists as a build option in `CMakeLists.txt`, but the current active deployment flow is based on the working 2 MB layout and the artifacts in `OTA_ready/`.

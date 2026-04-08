@@ -323,16 +323,33 @@ static void _send_ota_status(EspManager *esp) {
 
 static const char *_log_kind_name(uint8_t type) {
     switch (type) {
-        case LOG_BOOT:          return "BOOT";
-        case LOG_CHARGE_START:  return "CHARGE_START";
-        case LOG_CHARGE_END:    return "CHARGE_END";
-        case LOG_DISCHARGE_END: return "DISCHARGE_END";
-        case LOG_ALARM:         return "ALARM";
-        case LOG_SOC_WARN:      return "SOC_WARN";
-        case LOG_TEMP_WARN:     return "TEMP_WARN";
-        case LOG_OCP:           return "OCP";
-        case LOG_SAVE:          return "SAVE";
-        default:                return "UNKNOWN";
+        case LOG_BOOT:             return "BOOT";
+        case LOG_SAVE_OK:          return "SAVE_OK";
+        case LOG_SAVE_SKIP:        return "SAVE_SKIP";
+        case LOG_BROWNOUT_ENTER:   return "BROWNOUT_ENTER";
+        case LOG_BROWNOUT_EXIT:    return "BROWNOUT_EXIT";
+        case LOG_SAFE_MODE_ENTER:  return "SAFE_MODE_ENTER";
+        case LOG_SAFE_MODE_EXIT:   return "SAFE_MODE_EXIT";
+        case LOG_CHARGER_PRESENT:  return "CHARGER_PRESENT";
+        case LOG_CHARGER_LOST:     return "CHARGER_LOST";
+        case LOG_CHARGE_START:     return "CHARGE_START";
+        case LOG_CHARGE_END:       return "CHARGE_END";
+        case LOG_DISCHARGE_START:  return "DISCHARGE_START";
+        case LOG_DISCHARGE_END:    return "DISCHARGE_END";
+        case LOG_PORT_CHANGED:     return "PORT_CHANGED";
+        case LOG_ALARM_ENTER:      return "ALARM_ENTER";
+        case LOG_ALARM_EXIT:       return "ALARM_EXIT";
+        case LOG_ALARM_LEVEL:      return "ALARM_LEVEL";
+        case LOG_OCP_EVENT:        return "OCP";
+        case LOG_SOC_WARN:         return "SOC_WARN";
+        case LOG_TEMP_WARN:        return "TEMP_WARN";
+        case LOG_FAN_ON:           return "FAN_ON";
+        case LOG_FAN_OFF:          return "FAN_OFF";
+        case LOG_FAN_BLOCKED:      return "FAN_BLOCKED";
+        case LOG_SENSOR_FAULT:     return "SENSOR_FAULT";
+        case LOG_SENSOR_RECOVERED: return "SENSOR_RECOVERED";
+        case LOG_I2C_RECOVERY:     return "I2C_RECOVERY";
+        default:                   return "UNKNOWN";
     }
 }
 
@@ -340,7 +357,12 @@ static const char *_log_param_label(uint8_t type) {
     switch (type) {
         case LOG_CHARGE_END:
         case LOG_DISCHARGE_END: return "energy_wh";
-        case LOG_ALARM:         return "temperature";
+        case LOG_ALARM_ENTER:
+        case LOG_ALARM_EXIT:
+        case LOG_ALARM_LEVEL:   return "alarm_flags";
+        case LOG_FAN_ON:
+        case LOG_FAN_OFF:       return "temp_inv";
+        case LOG_I2C_RECOVERY:  return "fail_count";
         default:                return "value";
     }
 }
@@ -380,34 +402,38 @@ static int _format_alarm_names(uint32_t flags, char *out, int maxlen) {
 }
 
 static void _send_log_slice(EspManager *esp, uint32_t start, uint32_t count) {
-    char buf[384];
+    typedef struct {
+        char line[512];
+    } LogLine;
+    LogLine lines[16];
+    uint32_t sent = 0u;
     uint32_t total;
+
     if (!esp || !esp->logger) {
         _send_error(esp, "log_unavailable");
         return;
     }
+
     total = log_count(esp->logger);
     if (count == 0u) count = 1u;
     if (count > 16u) count = 16u;
     if (start >= total) {
-        snprintf(buf, sizeof(buf),
+        char meta[96];
+        snprintf(meta, sizeof(meta),
                  "{\"type\":\"log_meta\",\"total\":%lu,\"start\":%lu,\"sent\":0}",
                  (unsigned long)total,
                  (unsigned long)start);
-        _uart_write_line(esp, buf);
+        _uart_write_line(esp, meta);
         return;
     }
     if (start + count > total) count = total - start;
-    snprintf(buf, sizeof(buf),
-             "{\"type\":\"log_meta\",\"total\":%lu,\"start\":%lu,\"sent\":%lu}",
-             (unsigned long)total,
-             (unsigned long)start,
-             (unsigned long)count);
-    _uart_write_line(esp, buf);
-    for (uint32_t i = 0; i < count; ++i) {
+
+    for (uint32_t i = 0; i < count && sent < 16u; ++i) {
         LogEvent ev;
         uint32_t idx = start + i;
-        if (!log_read(esp->logger, idx, &ev)) break;
+        if (!log_read(esp->logger, idx, &ev)) {
+            continue; /* skip corrupted/unreadable entries */
+        }
         char time_str[32];
         char alarms[128];
         bool is_epoch = (ev.timestamp_s > 1700000000u);
@@ -427,32 +453,46 @@ static void _send_log_slice(EspManager *esp, uint32_t start, uint32_t count) {
         } else {
             _format_uptime(ev.timestamp_s, time_str, sizeof(time_str));
         }
-        _format_alarm_names(ev.alarm_flags, alarms, sizeof(alarms));
-        snprintf(buf, sizeof(buf),
-                 "{\"type\":\"log_event\",\"seq\":%lu,\"idx\":%lu,"
+        _format_alarm_names(ev.flags, alarms, sizeof(alarms));
+        snprintf(lines[sent].line, sizeof(lines[sent].line),
+                 "{\"type\":\"log_event\",\"idx\":%lu,"
                  "\"ts\":%lu,\"is_epoch\":%u,\"time\":\"%s\","
                  "\"kind\":%u,\"kind_name\":\"%s\","
-                 "\"soc_pct\":%u,\"temp_bat\":%u,\"temp_inv\":%u,"
+                 "\"cat\":%u,\"soc_pct\":%u,\"temp_bat\":%u,"
                  "\"voltage_v\":%.3f,\"current_a\":%.3f,"
-                 "\"param\":%.3f,\"param_label\":\"%s\","
-                 "\"alarms\":%lu,\"alarm_names\":\"%s\"}",
-                 (unsigned long)ev.seq,
+                 "\"value1\":%.3f,\"param_label\":\"%s\","
+                 "\"code\":%u,\"aux\":%u,"
+                 "\"flags\":%lu,\"alarm_names\":\"%s\"}",
                  (unsigned long)idx,
                  (unsigned long)ev.timestamp_s,
                  is_epoch ? 1u : 0u,
                  time_str,
                  (unsigned)ev.type,
                  _log_kind_name(ev.type),
+                 (unsigned)ev.category,
                  (unsigned)ev.soc_pct,
                  (unsigned)ev.temp_bat,
-                 (unsigned)ev.temp_inv,
                  ev.voltage,
                  ev.current,
-                 ev.param,
+                 ev.value1,
                  _log_param_label(ev.type),
-                 (unsigned long)ev.alarm_flags,
+                 (unsigned)ev.code,
+                 (unsigned)ev.aux,
+                 (unsigned long)ev.flags,
                  alarms);
-        _uart_write_line(esp, buf);
+        sent++;
+    }
+
+    char meta[96];
+    snprintf(meta, sizeof(meta),
+             "{\"type\":\"log_meta\",\"total\":%lu,\"start\":%lu,\"sent\":%lu}",
+             (unsigned long)total,
+             (unsigned long)start,
+             (unsigned long)sent);
+    _uart_write_line(esp, meta);
+
+    for (uint32_t i = 0; i < sent; ++i) {
+        _uart_write_line(esp, lines[i].line);
     }
 }
 

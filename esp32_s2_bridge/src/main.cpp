@@ -41,7 +41,7 @@ constexpr uint32_t kPicoOtaBeginTimeoutMs = 30000;
 constexpr uint32_t kPicoOtaChunkTimeoutMs = 10000;
 constexpr uint32_t kPicoOtaFinishTimeoutMs = 20000;
 constexpr uint32_t kOtaStepMs = 600;
-constexpr uint32_t kLogBatchSize = 16;
+constexpr uint32_t kLogBatchSize = 8;
 constexpr size_t kPicoOtaChunkBytes = 48;
 constexpr char kPicoOtaStagePath[] = "/pico_slot.bin";
 constexpr uint32_t kPicoOtaStageMaxBytes = 1024u * 1024u;
@@ -181,6 +181,9 @@ unsigned long gLastTelemetryReqMs = 0;
 unsigned long gLastOtaReqMs = 0;
 unsigned long gLastOtaStatusMs = 0;
 unsigned long gLastTimeSyncMs = 0;
+bool gNtpSynced = false;
+time_t gNtpEpoch = 0;
+unsigned long gNtpSyncMs = 0;
 
 }  // namespace
 
@@ -1178,6 +1181,14 @@ static String buildSystemJson() {
   out += gCache.ackCounter;
   out += ",\"error_counter\":";
   out += gCache.errorCounter;
+  out += ",\"ntp_enabled\":";
+  out += gNetCfg.ntpEnabled ? "true" : "false";
+  out += ",\"ntp_synced\":";
+  out += gNtpSynced ? "true" : "false";
+  out += ",\"ntp_epoch\":";
+  out += String((unsigned long)gNtpEpoch);
+  out += ",\"ntp_age_ms\":";
+  out += gNtpSynced ? String(millis() - gNtpSyncMs) : String(-1);
   out += ",\"pico_ota_mode\":";
   out += bridgeCacheWantsPicoOtaMode() ? "true" : "false";
   out += ",\"pico_ota_ready\":";
@@ -1924,10 +1935,16 @@ static void periodicBridgeTasks() {
   /* Sync real-time to Pico when NTP is available */
   if (!picoUploadBusy && gNetCfg.ntpEnabled && (now - gLastTimeSyncMs) >= kTimeSyncMs) {
     time_t epoch = time(nullptr);
-    if (epoch > 1700000000) {
+    const bool timeValid = epoch > 1700000000;
+    if (timeValid) {
+      gNtpSynced = true;
+      gNtpEpoch = epoch;
+      gNtpSyncMs = now;
       char buf[40];
       snprintf(buf, sizeof(buf), "SET time %lu", (unsigned long)epoch);
       sendBridgeLine(buf);
+    } else if ((now - gNtpSyncMs) > 300000) {  // 5 minutes without valid time
+      gNtpSynced = false;
     }
     gLastTimeSyncMs = now;
   }

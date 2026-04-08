@@ -1,5 +1,5 @@
 // ============================================================
-// bms/bms_logger.c - Append-only flash ring-buffer event log
+// bms/bms_logger.c - Append-only flash ring-buffer event log (v2)
 // ============================================================
 #include "bms_logger.h"
 #include "flash_nvm.h"
@@ -10,7 +10,7 @@
 #include <string.h>
 
 #define LOG_CAPACITY  ((FLASH_LOG_SECTORS - 2) * LOG_RECORDS_PER_SECTOR)
-#define LOG_MAGIC     0x4C4F4731u
+#define LOG_MAGIC     0x4C4F4732u   /* "LOG2" — v2 format, old log invalidated */
 
 #define LOG_HDR_SECTOR_A  0u
 #define LOG_HDR_SECTOR_B  1u
@@ -200,7 +200,7 @@ void log_init(BmsLogger *l) {
     if (!_header_load(&l->write_idx, &l->total_events, &l->_hdr_seq, &l->_hdr_slot)) {
         l->write_idx = 0u;
         l->total_events = 0u;
-        printf("[LOG] fresh log\n");
+        printf("[LOG] fresh log (v2)\n");
     } else {
         printf("[LOG] loaded: widx=%lu total=%lu seq=%lu slot=%u\n",
                (unsigned long)l->write_idx,
@@ -218,7 +218,6 @@ void log_write(BmsLogger *l, const LogEvent *ev) {
     if (!l || !ev || g_brownout) return;
 
     ev_crc = *ev;
-    ev_crc.seq = l->total_events;  /* monotonic event counter */
     ev_crc.crc = 0u;
     ev_crc.crc = nvm_crc32(&ev_crc, sizeof(LogEvent));
 
@@ -295,50 +294,234 @@ static uint32_t _ts(void) {
     return g_epoch_offset ? (uptime + g_epoch_offset) : uptime;
 }
 
+uint32_t log_now_epoch(void) {
+    if (!g_epoch_offset) return 0;
+    return _ts();
+}
+
+// ── Event construction helpers ──────────────────────────────
+
+static void _event_init(LogEvent *ev,
+                        uint8_t type,
+                        uint8_t category,
+                        uint8_t soc_pct,
+                        uint8_t temp_bat,
+                        float voltage,
+                        float current,
+                        float value1,
+                        uint16_t code,
+                        uint8_t aux,
+                        uint32_t flags) {
+    memset(ev, 0, sizeof(*ev));
+    ev->timestamp_s = _ts();
+    ev->type = type;
+    ev->category = category;
+    ev->soc_pct = soc_pct;
+    ev->temp_bat = temp_bat;
+    ev->voltage = voltage;
+    ev->current = current;
+    ev->value1 = value1;
+    ev->code = code;
+    ev->aux = aux;
+    ev->flags = flags;
+}
+
+void log_write_ex(BmsLogger *l,
+                  uint8_t type,
+                  uint8_t category,
+                  uint8_t soc_pct,
+                  uint8_t temp_bat,
+                  float voltage,
+                  float current,
+                  float value1,
+                  uint16_t code,
+                  uint8_t aux,
+                  uint32_t flags) {
+    LogEvent ev;
+    _event_init(&ev, type, category, soc_pct, temp_bat,
+                voltage, current, value1, code, aux, flags);
+    log_write(l, &ev);
+}
+
+// ── Typed wrappers ──────────────────────────────────────────
+
 void log_boot(BmsLogger *l, float soc, float v) {
-    LogEvent ev = {0};
-    ev.timestamp_s = _ts();
-    ev.type = LOG_BOOT;
-    ev.soc_pct = _u8_clamped(soc, 0.0f, 100.0f);
-    ev.voltage = v;
+    LogEvent ev;
+    _event_init(&ev, LOG_BOOT, LOG_CAT_SYSTEM,
+                _u8_clamped(soc, 0.0f, 100.0f), 0,
+                v, 0.0f, 0.0f, 0, 0, 0);
+    log_write(l, &ev);
+}
+
+void log_save_ok(BmsLogger *l, float soc, float v) {
+    LogEvent ev;
+    _event_init(&ev, LOG_SAVE_OK, LOG_CAT_DATA,
+                _u8_clamped(soc, 0.0f, 100.0f), 0,
+                v, 0.0f, 0.0f, 0, 0, 0);
+    log_write(l, &ev);
+}
+
+void log_save_skip(BmsLogger *l, uint16_t reason, float soc, float v) {
+    LogEvent ev;
+    _event_init(&ev, LOG_SAVE_SKIP, LOG_CAT_DATA,
+                _u8_clamped(soc, 0.0f, 100.0f), 0,
+                v, 0.0f, 0.0f, reason, 0, 0);
+    log_write(l, &ev);
+}
+
+void log_brownout_enter(BmsLogger *l, float v) {
+    LogEvent ev;
+    _event_init(&ev, LOG_BROWNOUT_ENTER, LOG_CAT_SYSTEM,
+                0, 0, v, 0.0f, 0.0f, 0, 0, 0);
+    log_write(l, &ev);
+}
+
+void log_brownout_exit(BmsLogger *l, float v) {
+    LogEvent ev;
+    _event_init(&ev, LOG_BROWNOUT_EXIT, LOG_CAT_SYSTEM,
+                0, 0, v, 0.0f, 0.0f, 0, 0, 0);
+    log_write(l, &ev);
+}
+
+void log_safe_mode_enter(BmsLogger *l, uint16_t reason, float soc, float v) {
+    LogEvent ev;
+    _event_init(&ev, LOG_SAFE_MODE_ENTER, LOG_CAT_SYSTEM,
+                _u8_clamped(soc, 0.0f, 100.0f), 0,
+                v, 0.0f, 0.0f, reason, 0, 0);
+    log_write(l, &ev);
+}
+
+void log_safe_mode_exit(BmsLogger *l, float soc, float v) {
+    LogEvent ev;
+    _event_init(&ev, LOG_SAFE_MODE_EXIT, LOG_CAT_SYSTEM,
+                _u8_clamped(soc, 0.0f, 100.0f), 0,
+                v, 0.0f, 0.0f, 0, 0, 0);
+    log_write(l, &ev);
+}
+
+void log_charger_present(BmsLogger *l, float v, float i) {
+    LogEvent ev;
+    _event_init(&ev, LOG_CHARGER_PRESENT, LOG_CAT_POWER,
+                0, 0, v, i, 0.0f, 0, 0, 0);
+    log_write(l, &ev);
+}
+
+void log_charger_lost(BmsLogger *l, float v) {
+    LogEvent ev;
+    _event_init(&ev, LOG_CHARGER_LOST, LOG_CAT_POWER,
+                0, 0, v, 0.0f, 0.0f, 0, 0, 0);
     log_write(l, &ev);
 }
 
 void log_charge_start(BmsLogger *l, float soc, float v, float current) {
-    LogEvent ev = {0};
-    ev.timestamp_s = _ts();
-    ev.type = LOG_CHARGE_START;
-    ev.soc_pct = _u8_clamped(soc, 0.0f, 100.0f);
-    ev.voltage = v;
-    ev.current = current;
-    log_write(l, &ev);
-}
-
-void log_discharge_end(BmsLogger *l, float soc, float wh) {
-    LogEvent ev = {0};
-    ev.timestamp_s = _ts();
-    ev.type = LOG_DISCHARGE_END;
-    ev.soc_pct = _u8_clamped(soc, 0.0f, 100.0f);
-    ev.param = wh;
-    log_write(l, &ev);
-}
-
-void log_alarm(BmsLogger *l, uint32_t alarms, float soc, float v, float t) {
-    LogEvent ev = {0};
-    ev.timestamp_s = _ts();
-    ev.type = LOG_ALARM;
-    ev.soc_pct = _u8_clamped(soc, 0.0f, 100.0f);
-    ev.voltage = v;
-    ev.temp_bat = _u8_clamped(t, 0.0f, 125.0f);
-    ev.alarm_flags = alarms;
+    LogEvent ev;
+    _event_init(&ev, LOG_CHARGE_START, LOG_CAT_POWER,
+                _u8_clamped(soc, 0.0f, 100.0f), 0,
+                v, current, 0.0f, 0, 0, 0);
     log_write(l, &ev);
 }
 
 void log_charge_end(BmsLogger *l, float soc, float wh) {
-    LogEvent ev = {0};
-    ev.timestamp_s = _ts();
-    ev.type = LOG_CHARGE_END;
-    ev.soc_pct = _u8_clamped(soc, 0.0f, 100.0f);
-    ev.param = wh;
+    LogEvent ev;
+    _event_init(&ev, LOG_CHARGE_END, LOG_CAT_POWER,
+                _u8_clamped(soc, 0.0f, 100.0f), 0,
+                0.0f, 0.0f, wh, 0, 0, 0);
+    log_write(l, &ev);
+}
+
+void log_discharge_start(BmsLogger *l, float soc, float v, float current) {
+    LogEvent ev;
+    _event_init(&ev, LOG_DISCHARGE_START, LOG_CAT_POWER,
+                _u8_clamped(soc, 0.0f, 100.0f), 0,
+                v, current, 0.0f, 0, 0, 0);
+    log_write(l, &ev);
+}
+
+void log_discharge_end(BmsLogger *l, float soc, float wh, float duration_h) {
+    LogEvent ev;
+    _event_init(&ev, LOG_DISCHARGE_END, LOG_CAT_POWER,
+                _u8_clamped(soc, 0.0f, 100.0f), 0,
+                0.0f, 0.0f, wh, 0, 0, 0);
+    ev.current = duration_h;  /* repurpose current field for duration */
+    log_write(l, &ev);
+}
+
+void log_port_changed(BmsLogger *l, uint8_t port_id, bool on, float v, float current) {
+    LogEvent ev;
+    _event_init(&ev, LOG_PORT_CHANGED, LOG_CAT_POWER,
+                0, 0, v, current, 0.0f, 0, port_id, 0);
+    ev.aux = port_id;
+    ev.code = on ? 1u : 0u;
+    log_write(l, &ev);
+}
+
+void log_alarm_enter(BmsLogger *l, uint32_t flags, float soc, float v, float t) {
+    LogEvent ev;
+    _event_init(&ev, LOG_ALARM_ENTER, LOG_CAT_PROT,
+                _u8_clamped(soc, 0.0f, 100.0f),
+                _u8_clamped(t, 0.0f, 125.0f),
+                v, 0.0f, 0.0f, 0, 0, flags);
+    log_write(l, &ev);
+}
+
+void log_alarm_exit(BmsLogger *l, uint32_t cleared_flags, float soc, float v, float t) {
+    LogEvent ev;
+    _event_init(&ev, LOG_ALARM_EXIT, LOG_CAT_PROT,
+                _u8_clamped(soc, 0.0f, 100.0f),
+                _u8_clamped(t, 0.0f, 125.0f),
+                v, 0.0f, 0.0f, 0, 0, cleared_flags);
+    log_write(l, &ev);
+}
+
+void log_alarm_level(BmsLogger *l, uint16_t code, uint32_t flags, float soc, float v, float t) {
+    LogEvent ev;
+    _event_init(&ev, LOG_ALARM_LEVEL, LOG_CAT_PROT,
+                _u8_clamped(soc, 0.0f, 100.0f),
+                _u8_clamped(t, 0.0f, 125.0f),
+                v, 0.0f, 0.0f, code, 0, flags);
+    log_write(l, &ev);
+}
+
+void log_fan_on(BmsLogger *l, float tbat, float tinv) {
+    LogEvent ev;
+    _event_init(&ev, LOG_FAN_ON, LOG_CAT_THERM,
+                0, _u8_clamped(tbat, 0.0f, 125.0f),
+                0.0f, 0.0f, tinv, 0, 0, 0);
+    log_write(l, &ev);
+}
+
+void log_fan_off(BmsLogger *l, float tbat, float tinv) {
+    LogEvent ev;
+    _event_init(&ev, LOG_FAN_OFF, LOG_CAT_THERM,
+                0, _u8_clamped(tbat, 0.0f, 125.0f),
+                0.0f, 0.0f, tinv, 0, 0, 0);
+    log_write(l, &ev);
+}
+
+void log_fan_blocked(BmsLogger *l, uint16_t reason) {
+    LogEvent ev;
+    _event_init(&ev, LOG_FAN_BLOCKED, LOG_CAT_THERM,
+                0, 0, 0.0f, 0.0f, 0.0f, reason, 0, 0);
+    log_write(l, &ev);
+}
+
+void log_sensor_fault(BmsLogger *l, uint16_t sensor_code, uint32_t valid_mask) {
+    LogEvent ev;
+    _event_init(&ev, LOG_SENSOR_FAULT, LOG_CAT_SYSTEM,
+                0, 0, 0.0f, 0.0f, 0.0f, sensor_code, 0, valid_mask);
+    log_write(l, &ev);
+}
+
+void log_sensor_recovered(BmsLogger *l, uint16_t sensor_code, uint32_t valid_mask) {
+    LogEvent ev;
+    _event_init(&ev, LOG_SENSOR_RECOVERED, LOG_CAT_SYSTEM,
+                0, 0, 0.0f, 0.0f, 0.0f, sensor_code, 0, valid_mask);
+    log_write(l, &ev);
+}
+
+void log_i2c_recovery(BmsLogger *l, uint32_t fail_count) {
+    LogEvent ev;
+    _event_init(&ev, LOG_I2C_RECOVERY, LOG_CAT_SYSTEM,
+                0, 0, 0.0f, 0.0f, (float)fail_count, 0, 0, 0);
     log_write(l, &ev);
 }

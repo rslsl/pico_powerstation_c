@@ -30,6 +30,7 @@ void session_manager_step(SessionManager *mgr,
         float session_wh = bat->soh_est.chg_wh_total - mgr->charge_start_wh;
         if (session_wh < 0.0f) session_wh = 0.0f;
         log_charge_end(logger, snap->display_soc_pct, session_wh);
+        stats_inc_charge_session(stats, session_wh);
     }
     mgr->prev_charge_active = snap->is_charging;
 
@@ -43,6 +44,7 @@ void session_manager_step(SessionManager *mgr,
         mgr->discharge_start_soc = snap->display_soc_pct / 100.0f;
         mgr->discharge_active_ms = ms_now;
         bat_cycle_begin(bat);
+        log_discharge_start(logger, snap->display_soc_pct, snap->voltage, snap->i_net);
         printf("[CYCLE] enter i=%.2fA P=%.1fW\n", snap->i_net, snap->power_w);
     } else if (mgr->prev_discharge_active && !discharge_active) {
         float session_wh = bat->soh_est.dis_wh_total - mgr->discharge_start_wh;
@@ -62,7 +64,7 @@ void session_manager_step(SessionManager *mgr,
                    (unsigned long)(discharge_dur_ms / 1000u),
                    dod_frac * 100.0f);
             bat_cycle_end(bat);
-            log_discharge_end(logger, snap->display_soc_pct, session_wh);
+            log_discharge_end(logger, snap->display_soc_pct, session_wh, session_h);
             stats_record_discharge_session(stats,
                                            session_wh,
                                            session_h,

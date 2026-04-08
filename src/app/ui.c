@@ -594,34 +594,47 @@ static void _confirm_apply(UI *ui) {
 static void _rs_publish(UI *ui) {
     struct {
         uint32_t timestamp_s;
-        uint8_t type;
-        uint8_t soc_pct;
-        uint8_t temp_bat;
-        float voltage;
-        float current;
-        float param;
-        uint32_t alarm_flags;
+        uint8_t  type;
+        uint8_t  category;
+        uint8_t  soc_pct;
+        uint8_t  temp_bat;
+        float    voltage;
+        float    current;
+        float    value1;
+        uint16_t code;
+        uint8_t  aux;
+        uint32_t flags;
     } log_cache_local[8] = {0};
     uint32_t log_total_local = ui->logger ? log_count(ui->logger) : 0u;
     uint8_t log_cache_n_local = 0u;
+    uint8_t log_filter_local = ui->rs.log_filter;
 
     if (ui->logger && ui->state == S_EVENTS) {
         int scroll = ui->ev_scroll;
         if (scroll < 0) scroll = 0;
-        for (int i = 0; i < 8; i++) {
-            int idx = (int)log_total_local - 1 - scroll - i;
+        int read_idx = (int)log_total_local - 1 - scroll;
+        while (log_cache_n_local < 8 && read_idx >= 0) {
             LogEvent ev;
-            if (idx < 0) break;
-            if (!log_read(ui->logger, (uint32_t)idx, &ev)) break;
-            log_cache_local[i].timestamp_s = ev.timestamp_s;
-            log_cache_local[i].type        = ev.type;
-            log_cache_local[i].soc_pct     = ev.soc_pct;
-            log_cache_local[i].temp_bat    = ev.temp_bat;
-            log_cache_local[i].voltage     = ev.voltage;
-            log_cache_local[i].current     = ev.current;
-            log_cache_local[i].param       = ev.param;
-            log_cache_local[i].alarm_flags = ev.alarm_flags;
+            if (!log_read(ui->logger, (uint32_t)read_idx, &ev)) { read_idx--; continue; }
+            /* Apply category filter */
+            if (log_filter_local > 0 && ev.category != (log_filter_local - 1)) {
+                read_idx--;
+                continue;
+            }
+            int ci = log_cache_n_local;
+            log_cache_local[ci].timestamp_s = ev.timestamp_s;
+            log_cache_local[ci].type        = ev.type;
+            log_cache_local[ci].category    = ev.category;
+            log_cache_local[ci].soc_pct     = ev.soc_pct;
+            log_cache_local[ci].temp_bat    = ev.temp_bat;
+            log_cache_local[ci].voltage     = ev.voltage;
+            log_cache_local[ci].current     = ev.current;
+            log_cache_local[ci].value1      = ev.value1;
+            log_cache_local[ci].code        = ev.code;
+            log_cache_local[ci].aux         = ev.aux;
+            log_cache_local[ci].flags       = ev.flags;
             log_cache_n_local++;
+            read_idx--;
         }
     }
 
@@ -691,6 +704,7 @@ static void _rs_publish(UI *ui) {
     // Pre-fetch last 9 log entries so Core1 never touches g_logger.
     rs->log_total = log_total_local;
     rs->log_cache_n = log_cache_n_local;
+    rs->log_filter = log_filter_local;
     memcpy(rs->log_cache, log_cache_local, sizeof(log_cache_local));
 
     // ── UI state ─────────────────────────────────────────────
@@ -1552,13 +1566,14 @@ static void _draw_wireless_saver_badge(Display *d, const FullUiSnapshot *rs) {
     _fill_circle(d, x + w - 12, y + h / 2, 3, dot_col);
 
     /* NTP sync badge */
-    if (rs->ntp_synced) {
+    {
         const int nx = x + w + 4;
-        const int nw = 38;
-        _draw_panel_box(d, nx, y, nw, h, UI_NEON_GRN, UI_NEON_GRN,
-                        _accent_fill(UI_NEON_GRN), false);
-        _draw_icon(d, nx + 4, y + 5, &UI_ICON_CLOCK, D_WHITE, 1);
-        disp_text(d, nx + 18, y + 7, "T", D_WHITE);
+        const int nw = 44;
+        const uint16_t col = rs->ntp_synced ? UI_NEON_GRN : UI_NEON_AMB;
+        const uint16_t fill_ntp = rs->ntp_synced ? _accent_fill(UI_NEON_GRN) : UI_BG_PANEL2;
+        _draw_panel_box(d, nx, y, nw, h, col, col, fill_ntp, false);
+        _draw_icon(d, nx + 4, y + 5, &UI_ICON_CLOCK, rs->ntp_synced ? D_WHITE : UI_NEON_AMB, 1);
+        disp_text(d, nx + 18, y + 7, rs->ntp_synced ? "SYNC" : "NO", rs->ntp_synced ? D_WHITE : UI_NEON_AMB);
     }
 }
 
@@ -1831,39 +1846,103 @@ static void _draw_scrollbar(Display *d, int x, int y, int h, int total, int visi
     disp_fill_rect(d, x, thumb_y, 4, thumb_h, D_ACCENT);
 }
 
-static void _format_log_age(uint32_t sec, char *buf, size_t n) {
-    if (sec < 60u) snprintf(buf, n, "%lus", (unsigned long)sec);
-    else if (sec < 3600u) snprintf(buf, n, "%lum", (unsigned long)(sec / 60u));
-    else if (sec < 86400u) snprintf(buf, n, "%luh", (unsigned long)(sec / 3600u));
-    else snprintf(buf, n, "%lud", (unsigned long)(sec / 86400u));
+static void _format_log_age(uint32_t ts, char *buf, size_t n) {
+    if (ts >= 1700000000u) {
+        /* Epoch-based: show HH:MM */
+        uint32_t day_sec = ts % 86400u;
+        uint32_t hh = day_sec / 3600u;
+        uint32_t mm = (day_sec % 3600u) / 60u;
+        snprintf(buf, n, "%02lu:%02lu", (unsigned long)hh, (unsigned long)mm);
+    } else {
+        /* Uptime-based */
+        if (ts < 60u)       snprintf(buf, n, "+%lus", (unsigned long)ts);
+        else if (ts < 3600u)  snprintf(buf, n, "+%lum", (unsigned long)(ts / 60u));
+        else if (ts < 86400u) snprintf(buf, n, "+%luh", (unsigned long)(ts / 3600u));
+        else                  snprintf(buf, n, "+%lud", (unsigned long)(ts / 86400u));
+    }
+}
+
+static bool _format_eta_minutes(int minutes, const char *suffix, char *buf, size_t n) {
+    if (minutes <= 0 || minutes >= 9999) return false;
+    uint32_t now_epoch = log_now_epoch();
+    char eta[20] = {0};
+    if (now_epoch) {
+        uint32_t eta_epoch = now_epoch + (uint32_t)minutes * 60u + ETA_TZ_OFFSET_SEC;
+        uint32_t day_sec = eta_epoch % 86400u;
+        uint32_t hh = day_sec / 3600u;
+        uint32_t mm = (day_sec % 3600u) / 60u;
+        snprintf(eta, sizeof(eta), " · ETA %02lu:%02lu",
+                 (unsigned long)hh, (unsigned long)mm);
+    }
+    int hh_local = minutes / 60;
+    int mm_local = minutes % 60;
+    if (hh_local > 0)
+        snprintf(buf, n, "%dH %02dM %s%s", hh_local, mm_local, suffix ? suffix : "", eta);
+    else
+        snprintf(buf, n, "%dM %s%s", mm_local, suffix ? suffix : "", eta);
+    return true;
 }
 
 static const char *_log_type_name(uint8_t type) {
     switch (type) {
-        case LOG_BOOT: return "BOOT";
-        case LOG_CHARGE_START: return "CHARGE IN";
-        case LOG_CHARGE_END: return "CHARGE DONE";
-        case LOG_DISCHARGE_END: return "RUN DONE";
-        case LOG_ALARM: return "ALARM";
-        case LOG_SOC_WARN: return "LOW SOC";
-        case LOG_TEMP_WARN: return "THERMAL";
-        case LOG_OCP: return "OCP CUT";
-        case LOG_SAVE: return "SAVE";
+        case LOG_BOOT:             return "BOOT";
+        case LOG_SAVE_OK:          return "SAVE OK";
+        case LOG_SAVE_SKIP:        return "SAVE SKIP";
+        case LOG_BROWNOUT_ENTER:   return "BROWNOUT";
+        case LOG_BROWNOUT_EXIT:    return "BROWNOUT OK";
+        case LOG_SAFE_MODE_ENTER:  return "SAFE MODE";
+        case LOG_SAFE_MODE_EXIT:   return "SAFE EXIT";
+        case LOG_CHARGER_PRESENT:  return "CHARGER IN";
+        case LOG_CHARGER_LOST:     return "CHARGER OUT";
+        case LOG_CHARGE_START:     return "CHARGE IN";
+        case LOG_CHARGE_END:       return "CHARGE END";
+        case LOG_DISCHARGE_START:  return "DISCHARGE";
+        case LOG_DISCHARGE_END:    return "RUN DONE";
+        case LOG_PORT_CHANGED:     return "PORT";
+        case LOG_ALARM_ENTER:      return "ALARM";
+        case LOG_ALARM_EXIT:       return "ALARM CLR";
+        case LOG_ALARM_LEVEL:      return "ALARM LVL";
+        case LOG_OCP_EVENT:        return "OCP CUT";
+        case LOG_SOC_WARN:         return "LOW SOC";
+        case LOG_TEMP_WARN:        return "THERMAL";
+        case LOG_FAN_ON:           return "FAN ON";
+        case LOG_FAN_OFF:          return "FAN OFF";
+        case LOG_FAN_BLOCKED:      return "FAN BLOCK";
+        case LOG_SENSOR_FAULT:     return "SENSOR X";
+        case LOG_SENSOR_RECOVERED: return "SENSOR OK";
+        case LOG_I2C_RECOVERY:     return "I2C RECOV";
         default: return "EVENT";
     }
 }
 
 static uint16_t _log_type_color(uint8_t type) {
     switch (type) {
-        case LOG_BOOT: return D_ACCENT;
-        case LOG_CHARGE_START: return D_GREEN;
-        case LOG_CHARGE_END: return D_ORANGE;
-        case LOG_DISCHARGE_END: return D_TEXT;
-        case LOG_ALARM: return D_RED;
-        case LOG_SOC_WARN: return D_ORANGE;
-        case LOG_TEMP_WARN: return UI_NEON_AMB;
-        case LOG_OCP: return D_RED;
-        case LOG_SAVE: return UI_NEON_BLUE;
+        case LOG_BOOT:             return D_ACCENT;
+        case LOG_SAVE_OK:          return UI_NEON_BLUE;
+        case LOG_SAVE_SKIP:        return D_ORANGE;
+        case LOG_BROWNOUT_ENTER:   return D_RED;
+        case LOG_BROWNOUT_EXIT:    return D_GREEN;
+        case LOG_SAFE_MODE_ENTER:  return D_RED;
+        case LOG_SAFE_MODE_EXIT:   return D_GREEN;
+        case LOG_CHARGER_PRESENT:  return D_GREEN;
+        case LOG_CHARGER_LOST:     return D_ORANGE;
+        case LOG_CHARGE_START:     return D_GREEN;
+        case LOG_CHARGE_END:       return D_ORANGE;
+        case LOG_DISCHARGE_START:  return D_TEXT;
+        case LOG_DISCHARGE_END:    return D_TEXT;
+        case LOG_PORT_CHANGED:     return D_ACCENT;
+        case LOG_ALARM_ENTER:      return D_RED;
+        case LOG_ALARM_EXIT:       return D_GREEN;
+        case LOG_ALARM_LEVEL:      return D_RED;
+        case LOG_OCP_EVENT:        return D_RED;
+        case LOG_SOC_WARN:         return D_ORANGE;
+        case LOG_TEMP_WARN:        return UI_NEON_AMB;
+        case LOG_FAN_ON:           return UI_NEON_AMB;
+        case LOG_FAN_OFF:          return D_ACCENT;
+        case LOG_FAN_BLOCKED:      return D_RED;
+        case LOG_SENSOR_FAULT:     return D_RED;
+        case LOG_SENSOR_RECOVERED: return D_GREEN;
+        case LOG_I2C_RECOVERY:     return D_ORANGE;
         default: return D_TEXT;
     }
 }
@@ -1891,25 +1970,115 @@ static const char *_alarm_primary_name(uint32_t flags) {
     return "ALARM";
 }
 
+static const char *_log_reason_name(uint16_t code) {
+    switch (code) {
+        case LOG_REASON_STARTUP_HOLDOFF: return "startup holdoff";
+        case LOG_REASON_SOC_SETTLING:    return "SOC settling";
+        case LOG_REASON_PACK_STALE:      return "pack stale";
+        case LOG_REASON_CELLS_STALE:     return "cells stale";
+        case LOG_REASON_BROWNOUT:        return "brownout";
+        case LOG_REASON_INVALID_SOC:     return "SOC invalid";
+        case LOG_REASON_INVALID_SOH:     return "SOH invalid";
+        case LOG_REASON_INVALID_R0:      return "R0 invalid";
+        case LOG_REASON_SAFE_MODE:       return "safe mode";
+        case LOG_REASON_NO_SENSOR:       return "no sensor";
+        case LOG_REASON_USER:            return "user";
+        case LOG_REASON_AUTO:            return "auto";
+        case LOG_REASON_SOC_UNSTABLE:    return "SOC unstable";
+        default: return "";
+    }
+}
+
+static const char *_log_sensor_name(uint16_t code) {
+    switch (code) {
+        case 0: return "PACK INA226";
+        case 1: return "CHG INA226";
+        case 2: return "CELL INA3221";
+        case 3: return "TBAT LM75";
+        case 4: return "TUSB LM75";
+        default: return "SENSOR";
+    }
+}
+
+static const char *_log_port_name(uint8_t port_id) {
+    switch (port_id) {
+        case 0: return "DC OUT";
+        case 1: return "SYS HOLD";
+        case 2: return "USB PD";
+        case 3: return "FAN";
+        case 4: return "CHARGE";
+        default: return "PORT";
+    }
+}
+
+static const char *_log_filter_name(uint8_t f) {
+    switch (f) {
+        case 0: return "ALL";
+        case 1: return "SYSTEM";
+        case 2: return "POWER";
+        case 3: return "PROTECT";
+        case 4: return "THERMAL";
+        case 5: return "DATA";
+        default: return "ALL";
+    }
+}
+
 static void _format_log_value(uint8_t type, uint8_t soc_pct, uint8_t temp_bat,
-                              float voltage, float current, float param,
-                              uint32_t alarm_flags,
+                              float voltage, float current, float value1,
+                              uint32_t flags, uint16_t code, uint8_t aux,
                               char *buf, size_t n) {
     switch (type) {
         case LOG_BOOT:
             snprintf(buf, n, "%u%%  %.2fV", soc_pct, voltage);
             break;
+        case LOG_SAVE_OK:
+            snprintf(buf, n, "%u%%  %.2fV", soc_pct, voltage);
+            break;
+        case LOG_SAVE_SKIP:
+            snprintf(buf, n, "%s", _log_reason_name(code));
+            break;
+        case LOG_BROWNOUT_ENTER:
+        case LOG_BROWNOUT_EXIT:
+            snprintf(buf, n, "%.2fV", voltage);
+            break;
+        case LOG_SAFE_MODE_ENTER:
+            snprintf(buf, n, "%s %u%%", _log_reason_name(code), soc_pct);
+            break;
+        case LOG_SAFE_MODE_EXIT:
+            snprintf(buf, n, "%u%%  %.2fV", soc_pct, voltage);
+            break;
+        case LOG_CHARGER_PRESENT:
+            snprintf(buf, n, "+%.2fA  %.2fV", current, voltage);
+            break;
+        case LOG_CHARGER_LOST:
+            snprintf(buf, n, "%.2fV", voltage);
+            break;
         case LOG_CHARGE_START:
             snprintf(buf, n, "+%.1fA  %.2fV", current, voltage);
             break;
         case LOG_CHARGE_END:
-            snprintf(buf, n, "+%.0fWh  %u%%", param, soc_pct);
+            snprintf(buf, n, "+%.0fWh  %u%%", value1, soc_pct);
+            break;
+        case LOG_DISCHARGE_START:
+            snprintf(buf, n, "%.1fA  %.2fV", current, voltage);
             break;
         case LOG_DISCHARGE_END:
-            snprintf(buf, n, "-%.0fWh  %u%%", param, soc_pct);
+            snprintf(buf, n, "-%.0fWh  %u%%", value1, soc_pct);
             break;
-        case LOG_ALARM:
-            snprintf(buf, n, "%s", _alarm_primary_name(alarm_flags));
+        case LOG_PORT_CHANGED:
+            snprintf(buf, n, "%s %s", _log_port_name(aux), code ? "ON" : "OFF");
+            break;
+        case LOG_ALARM_ENTER:
+            snprintf(buf, n, "%s", _alarm_primary_name(flags));
+            break;
+        case LOG_ALARM_EXIT:
+            snprintf(buf, n, "CLR %s", _alarm_primary_name(flags));
+            break;
+        case LOG_ALARM_LEVEL:
+            snprintf(buf, n, "%s", _alarm_primary_name(flags));
+            break;
+        case LOG_OCP_EVENT:
+            snprintf(buf, n, "LOAD CUT");
             break;
         case LOG_SOC_WARN:
             snprintf(buf, n, "%u%% REMAIN", soc_pct);
@@ -1917,11 +2086,21 @@ static void _format_log_value(uint8_t type, uint8_t soc_pct, uint8_t temp_bat,
         case LOG_TEMP_WARN:
             snprintf(buf, n, "%uC  %.2fV", temp_bat, voltage);
             break;
-        case LOG_OCP:
-            snprintf(buf, n, "LOAD CUT");
+        case LOG_FAN_ON:
+        case LOG_FAN_OFF:
+            snprintf(buf, n, "BAT %uC  USB %.0fC", temp_bat, value1);
             break;
-        case LOG_SAVE:
-            snprintf(buf, n, "%u%%  %.2fV", soc_pct, voltage);
+        case LOG_FAN_BLOCKED:
+            snprintf(buf, n, "%s", _log_reason_name(code));
+            break;
+        case LOG_SENSOR_FAULT:
+            snprintf(buf, n, "%s lost", _log_sensor_name(code));
+            break;
+        case LOG_SENSOR_RECOVERED:
+            snprintf(buf, n, "%s back", _log_sensor_name(code));
+            break;
+        case LOG_I2C_RECOVERY:
+            snprintf(buf, n, "fails=%.0f", value1);
             break;
         default:
             snprintf(buf, n, "%u%%  %.2fV", soc_pct, voltage);
@@ -2117,9 +2296,8 @@ static void _render_charge_saver_anim(Display *d, const FullUiSnapshot *rs) {
     _text_center_box(d, safe_x, safe_w, h - 64, buf, UI_NEON_GRN, 2);
 
     if (b->time_min > 0 && b->time_min < 9999) {
-        snprintf(buf, sizeof(buf), "%dH %02dM TO FULL",
-                 b->time_min / 60, b->time_min % 60);
-        disp_text_center_safe(d, h - 38, buf, D_GREEN);
+        if (_format_eta_minutes(b->time_min, "TO FULL", buf, sizeof(buf)))
+            disp_text_center_safe(d, h - 38, buf, D_GREEN);
     } else {
         disp_text_center_safe(d, h - 38, "ESTIMATING...", D_SUBTEXT);
     }
@@ -2190,11 +2368,8 @@ static void _render_discharge_saver_anim(Display *d, const FullUiSnapshot *rs) {
     }
 
     if (b->time_min > 0 && b->time_min < 6000) {
-        int hh = b->time_min / 60;
-        int mm = b->time_min % 60;
-        if (hh > 0) snprintf(buf, sizeof(buf), "%dH %02dM LEFT", hh, mm);
-        else snprintf(buf, sizeof(buf), "%dM LEFT", mm);
-        disp_text_center_safe(d, h - 38, buf, glow_col);
+        if (_format_eta_minutes(b->time_min, "LEFT", buf, sizeof(buf)))
+            disp_text_center_safe(d, h - 38, buf, glow_col);
     } else {
         snprintf(buf, sizeof(buf), "%.1fV  %.0fWH", b->voltage, b->remaining_wh);
         disp_text_center_safe(d, h - 38, buf, D_SUBTEXT);
@@ -3180,14 +3355,18 @@ static void _render_ota_ref(Display *d, const FullUiSnapshot *rs) {
 }
 
 static void _render_events(Display *d, const FullUiSnapshot *rs) {
-    char title_right[16];
+    char title_right[24];
     char age_buf[8];
     char label_buf[28];
     char value_buf[24];
 
     _draw_grid_background(d);
-    if (rs->log_total > 0) snprintf(title_right, sizeof(title_right), "%lu EV", (unsigned long)rs->log_total);
-    else title_right[0] = '\0';
+    if (rs->log_total > 0) {
+        snprintf(title_right, sizeof(title_right), "%lu EV  %s",
+                 (unsigned long)rs->log_total, _log_filter_name(rs->log_filter));
+    } else {
+        snprintf(title_right, sizeof(title_right), "%s", _log_filter_name(rs->log_filter));
+    }
     _draw_screen_title(d, "EVENT LOG", title_right);
 
     if (rs->log_total == 0 || rs->log_cache_n == 0) {
@@ -3202,8 +3381,10 @@ static void _render_events(Display *d, const FullUiSnapshot *rs) {
                               rs->log_cache[row].temp_bat,
                               rs->log_cache[row].voltage,
                               rs->log_cache[row].current,
-                              rs->log_cache[row].param,
-                              rs->log_cache[row].alarm_flags,
+                              rs->log_cache[row].value1,
+                              rs->log_cache[row].flags,
+                              rs->log_cache[row].code,
+                              rs->log_cache[row].aux,
                               value_buf, sizeof(value_buf));
             _draw_list_card(d, 12, 42 + row * 24, 216, 20, label_buf, value_buf,
                             _log_type_color(rs->log_cache[row].type), false);

@@ -25,6 +25,22 @@ static bool _save_runtime_data_valid(const Battery *bat) {
     return true;
 }
 
+#define SAVE_SKIP_LOG_INTERVAL_MS  600000u  /* 10 minutes */
+
+static uint16_t _save_reason_to_code(const char *reason) {
+    if (!reason) return LOG_REASON_NONE;
+    if (strcmp(reason, "startup holdoff") == 0) return LOG_REASON_STARTUP_HOLDOFF;
+    if (strcmp(reason, "soc settling") == 0)    return LOG_REASON_SOC_SETTLING;
+    if (strcmp(reason, "pack stale") == 0)      return LOG_REASON_PACK_STALE;
+    if (strcmp(reason, "cells stale") == 0)     return LOG_REASON_CELLS_STALE;
+    if (strcmp(reason, "brownout") == 0)        return LOG_REASON_BROWNOUT;
+    if (strcmp(reason, "soc invalid") == 0)     return LOG_REASON_INVALID_SOC;
+    if (strcmp(reason, "soh invalid") == 0)     return LOG_REASON_INVALID_SOH;
+    if (strcmp(reason, "r0 invalid") == 0)      return LOG_REASON_INVALID_R0;
+    if (strcmp(reason, "soc unstable") == 0)    return LOG_REASON_SOC_UNSTABLE;
+    return LOG_REASON_NONE;
+}
+
 static const char *_save_reject_reason(const SaveManager *mgr,
                                        const Battery *bat,
                                        uint32_t ms_now) {
@@ -124,6 +140,15 @@ void save_manager_commit(SaveManager *mgr,
 
     reject = _save_reject_reason(mgr, bat, ms_now);
     if (reject) {
+        uint16_t code = _save_reason_to_code(reject);
+        bool reason_changed = (code != mgr->last_skip_reason);
+        bool interval_passed = (ms_now - mgr->last_skip_log_ms) >= SAVE_SKIP_LOG_INTERVAL_MS;
+        if (reason_changed || interval_passed) {
+            log_save_skip(logger, code, bat->soc, bat->voltage);
+            stats_inc_save_skip(stats);
+            mgr->last_skip_reason = code;
+            mgr->last_skip_log_ms = ms_now;
+        }
         printf("[SAVE] skipped: %s SOC=%.1f%% std=%.2f V=%.2fV valid=0x%02X uptime=%lus\n",
                reject, bat->soc, bat->soc_std, bat->voltage,
                bat->meas_valid, (unsigned long)(ms_now / 1000u));
@@ -140,6 +165,7 @@ void save_manager_commit(SaveManager *mgr,
     }
 
     if (bat_saved || stats_saved) {
+        log_save_ok(logger, bat->soc, bat->voltage);
         printf("[SAVE] SOC=%.1f%% SOH=%.1f%% bat=%s stats=%s\n",
                bat->soc, bat->soh,
                bat_saved ? "ok" : "skip",

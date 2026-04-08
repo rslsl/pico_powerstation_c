@@ -1,25 +1,34 @@
-# Pico PowerStation OTA ESP: інструкція з прошивки
+# PowerStation OTA ESP: Інструкція з прошивки
 
-## Готові файли
+## Актуальні готові файли
 
-Актуальні релізні артефакти знаходяться в [release/1.0](../release/1.0):
+Поточні файли для прошивки знаходяться в `../OTA_ready/`:
 
-- [combined_loader_recovery_main.uf2](../release/1.0/combined_loader_recovery_main.uf2)
-- [pico_powerstation_recovery_slot_a.bin](../release/1.0/pico_powerstation_recovery_slot_a.bin)
-- [pico_powerstation_main_slot_b.bin](../release/1.0/pico_powerstation_main_slot_b.bin)
-- [esp32_s2_bridge_ota.bin](../release/1.0/esp32_s2_bridge_ota.bin)
+- `combined_loader_recovery_main.uf2`
+- `pico_powerstation_slot_b.bin`
+- `esp32_s2_bridge.bin`
 
-## 1. Повна прошивка Pico через UF2
+Саме ці артефакти відповідають поточній структурі репозиторію та актуальному коду.
 
-Використовуйте цей спосіб для первинної прошивки або повного відновлення.
+## 1. Повна прошивка Pico / відновлення
+
+Використовуйте цей спосіб для:
+
+- першої прошивки
+- повного відновлення пристрою
+- запису `loader + slot A + slot B` за один раз
+
+Файл:
+
+- `../OTA_ready/combined_loader_recovery_main.uf2`
 
 Кроки:
 
 1. Вимкніть Pico.
-2. Натисніть і утримуйте `BOOTSEL`.
-3. Підключіть Pico до ПК через USB.
-4. У системі з'явиться диск `RPI-RP2`.
-5. Скопіюйте на нього [combined_loader_recovery_main.uf2](../release/1.0/combined_loader_recovery_main.uf2).
+2. Затисніть `BOOTSEL`.
+3. Підключіть Pico по USB.
+4. Дочекайтеся появи диска `RPI-RP2`.
+5. Скопіюйте `combined_loader_recovery_main.uf2` на цей диск.
 6. Дочекайтеся завершення копіювання та автоматичного перезапуску плати.
 
 Результат:
@@ -30,46 +39,42 @@
 
 ## 2. Прошивка ESP32-S2 bridge
 
-### Варіант A: стандартний upload із підготовленого build
+### Варіант A: стандартний serial upload із поточного PlatformIO-проєкту
 
-Це рекомендований спосіб для робочого проєкту.
+Це рекомендований спосіб, якщо ESP32-S2 підключена до ПК.
 
-Потрібно:
-
-- підключена ESP32-S2
-- зібрана директорія `build/esp_upload`
-- `arduino-cli`
-
-Приклад команди:
+Збірка та upload:
 
 ```powershell
-"C:\Program Files\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe" upload `
-  -p COM16 `
-  --fqbn esp32:esp32:lolin_s2_mini `
-  --input-dir C:\pico\pico_powerstation_c\build\esp_upload `
-  -v
+cd C:\pico\Powerstation_OTA_2\esp32_s2_bridge
+python -m platformio run -t upload --upload-port COM16
 ```
 
-Цей шлях записує повний комплект, сумісний із поточною збіркою bridge.
+Замініть `COM16` на реальний порт ESP.
 
-### Варіант B: використання готового application image
+### Варіант B: використання готового образу ESP
 
-[esp32_s2_bridge_ota.bin](../release/1.0/esp32_s2_bridge_ota.bin) — це актуальний application image bridge.
+Файл:
 
-Його слід використовувати лише у тих сценаріях, де bootloader і partition table на ESP уже відповідають поточній конфігурації проєкту.
+- `../OTA_ready/esp32_s2_bridge.bin`
+
+Цей варіант підходить, якщо:
+
+- на пристрої вже сумісний bootloader і коректна partition layout
+- ви оновлюєте ESP через наявний OTA-механізм або інший перевірений спосіб запису
 
 ## 3. Вхід у boot menu Pico
 
-Тепер `Down` на старті не запускає OTA одразу.
+Тепер `Down` не запускає OTA напряму. Він відкриває recovery boot menu.
 
-Щоб відкрити boot menu:
+Кроки:
 
 1. Повністю вимкніть систему.
 2. Затисніть `Down`.
 3. Увімкніть живлення, продовжуючи тримати кнопку.
-4. Дочекайтесь появи boot menu.
+4. Дочекайтеся появи boot menu.
 
-У boot menu доступні:
+У меню доступні:
 
 - `PICO OTA`
 - `BOOT MAIN`
@@ -77,36 +82,47 @@
 
 ## 4. OTA-оновлення Pico через ESP
 
-Цей сценарій використовується для оновлення лише `slot B`.
+Цей сценарій оновлює тільки `slot B`.
+
+Файл:
+
+- `../OTA_ready/pico_powerstation_slot_b.bin`
 
 Кроки:
 
 1. Увійдіть у boot menu Pico.
 2. Оберіть `PICO OTA`.
 3. Підключіться до ESP bridge через Wi-Fi або локальну мережу.
-4. Відкрийте окрему Pico OTA сторінку ESP.
-5. Завантажте файл [pico_powerstation_main_slot_b.bin](../release/1.0/pico_powerstation_main_slot_b.bin).
-6. Дочекайтесь завершення staging на ESP і передачі в Pico.
-7. Після завершення Pico має перезавантажитися в основний робочий стан.
+4. Відкрийте окрему Pico OTA сторінку на ESP.
+5. Завантажте `pico_powerstation_slot_b.bin`.
+6. Дочекайтеся завершення staging на ESP і передачі в Pico.
+7. Після завершення Pico має перезавантажитися в нормальний робочий режим.
 
 ## 5. Повернення в нормальний режим без OTA
 
-Якщо треба просто вийти з recovery:
+Якщо потрібно просто вийти з recovery:
 
-1. Відкрийте boot menu через `Down` при старті.
+1. Відкрийте boot menu через `Down` під час старту.
 2. Оберіть `BOOT MAIN`.
 
 ## 6. Повернення в USB BOOTSEL
 
 Якщо OTA недоступне або потрібне повне відновлення:
 
-1. Відкрийте boot menu через `Down` при старті.
+1. Відкрийте boot menu через `Down` під час старту.
 2. Оберіть `USB BOOTSEL`.
-3. Після цього прошийте [combined_loader_recovery_main.uf2](../release/1.0/combined_loader_recovery_main.uf2).
+3. Прошийте `../OTA_ready/combined_loader_recovery_main.uf2`.
 
-## 7. Що використовувати в типовому сервісному сценарії
+## 7. Типові сервісні сценарії
 
-- Для повного відновлення Pico: `combined_loader_recovery_main.uf2`
-- Для OTA Pico через ESP: `pico_powerstation_main_slot_b.bin`
-- Для оновлення recovery окремо: `pico_powerstation_recovery_slot_a.bin`
-- Для bridge ESP: `esp32_s2_bridge_ota.bin` або стандартний upload із `build/esp_upload`
+- Повне відновлення Pico: `combined_loader_recovery_main.uf2`
+- OTA Pico через ESP: `pico_powerstation_slot_b.bin`
+- Оновлення ESP bridge: `esp32_s2_bridge.bin` або serial upload із `esp32_s2_bridge`
+
+## 8. Примітка щодо старих файлів
+
+Старі release-папки та архівні артефакти більше не є основним джерелом актуальних прошивок.
+
+Для поточної роботи використовуйте папку `OTA_ready/`.
+
+Якщо потрібен окремий образ recovery `slot A` або інші нестандартні артефакти, їх слід перебирати з поточного `CMake`-проєкту, а не брати зі старих релізних папок.

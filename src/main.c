@@ -84,6 +84,10 @@ static uint         g_bat_lock_num;
 
 static bool  g_inv_sensor_absent_logged = false;
 static bool  g_fan_forced_on = false;
+static bool  g_fan_blocked_logged = false;
+static bool  g_prev_brownout = false;
+static bool  g_prev_charger_present = false;
+static uint8_t g_prev_meas_valid = 0;
 static volatile bool g_core1_ready = false;
 static BootMode g_boot_mode = BOOT_NORMAL;
 static bool g_boot_ota_safe_requested = false;
@@ -362,7 +366,17 @@ static void _snapshot_update(void) {
 }
 
 static void _check_brownout(void) {
-    log_set_brownout(g_bat.voltage < VBAT_BROWNOUT_V);
+    bool now_brownout = g_bat.voltage < VBAT_BROWNOUT_V;
+    log_set_brownout(now_brownout);
+
+    if (!g_prev_brownout && now_brownout) {
+        log_brownout_enter(&g_logger, g_bat.voltage);
+        stats_inc_brownout(&g_stats);
+    } else if (g_prev_brownout && !now_brownout) {
+        log_brownout_exit(&g_logger, g_bat.voltage);
+    }
+
+    g_prev_brownout = now_brownout;
 }
 
 // в"Ђв"Ђ I2C recovery в"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђ
@@ -375,6 +389,7 @@ static void _i2c_check_and_recover(bool ok) {
         g_i2c_fail_streak = 0;
         tca_init(&g_tca, I2C_PORT, TCA_ADDR);
         prot_set_i2c_fault(&g_prot, true);
+        log_i2c_recovery(&g_logger, g_bat.i2c_fail_count);
     }
 }
 
@@ -402,6 +417,13 @@ static void _charger_detect(void) {
     bool chg_valid = bat_meas_fresh(&g_bat, MEAS_VALID_CHG);
     bool present = chg_valid && runtime_policy_charger_present(g_bat.i_chg);
     pwr_set_charger_present(&g_pwr, present);
+
+    if (!g_prev_charger_present && present) {
+        log_charger_present(&g_logger, g_bat.voltage, g_bat.i_chg);
+    } else if (g_prev_charger_present && !present) {
+        log_charger_lost(&g_logger, g_bat.voltage);
+    }
+    g_prev_charger_present = present;
 }
 
 // в"Ђв"Ђ FMEA-15: Fan relay guard в"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђ
@@ -412,6 +434,10 @@ static void _guard_inverter(void) {
             printf("[GUARD] FMEA-15: fan relay blocked (no temp sensor)\n");
             ui_toast(&g_ui, "Fan relay LOCKED: no temp sensor");
             g_inv_sensor_absent_logged = true;
+        }
+        if (!g_fan_blocked_logged) {
+            log_fan_blocked(&g_logger, LOG_REASON_NO_SENSOR);
+            g_fan_blocked_logged = true;
         }
     }
 }
@@ -433,10 +459,12 @@ static void _fan_control(void) {
     if (!g_fan_forced_on && over_on) {
         pwr_enable(&g_pwr, PORT_FAN);
         g_fan_forced_on = true;
+        log_fan_on(&g_logger, g_bat.temp_bat, g_bat.temp_inv);
         printf("[THERM] fan ON: bat=%.1fC dc-usb=%.1fC\n", g_bat.temp_bat, g_bat.temp_inv);
     } else if (g_fan_forced_on && below_off) {
         pwr_disable(&g_pwr, PORT_FAN);
         g_fan_forced_on = false;
+        log_fan_off(&g_logger, g_bat.temp_bat, g_bat.temp_inv);
         printf("[THERM] fan OFF: bat=%.1fC dc-usb=%.1fC\n", g_bat.temp_bat, g_bat.temp_inv);
     }
 }
@@ -864,6 +892,7 @@ int main(void) {
         pwr_set_safe_mode(&g_pwr, true);
         buz_play(&g_buz, BUZ_ALARM_CRIT);
         ui_toast(&g_ui, "Startup blocked - diagnostics");
+        log_safe_mode_enter(&g_logger, LOG_REASON_SAFE_MODE, soc_ocv, g_bat.voltage);
         printf("[BOOT] DIAGNOSTIC - validation failed\n");
         printf("[BOOT] DIAGNOSTIC - safe mode active\n");
         // Р—Р°РїСѓСЃРєР°С"РјРѕ Core1 С‰РѕР± РїРѕРєР°Р·Р°С‚Рё РїРѕРјРёР»РєСѓ РЅР° РґРёСЃРїР»РµС—
@@ -877,6 +906,7 @@ int main(void) {
         pwr_set_safe_mode(&g_pwr, true);
         ui_set_state(&g_ui, S_OTA);
         buz_play(&g_buz, BUZ_BOOT);
+        log_safe_mode_enter(&g_logger, LOG_REASON_AUTO, soc_ocv, g_bat.voltage);
         printf("[BOOT] OTA_SAFE - loads isolated, ESP forced OTA\n");
         break;
     }
@@ -954,6 +984,27 @@ int main(void) {
             _charger_detect();
             _i2c_check_and_recover(g_bat.i2c_fail_count == 0);
             _check_brownout();
+
+            /* Sensor fault/recovered tracking */
+            {
+                uint8_t cur_valid = g_bat.meas_valid;
+                uint8_t lost     = g_prev_meas_valid & ~cur_valid;
+                uint8_t restored = ~g_prev_meas_valid & cur_valid;
+                static const uint8_t sensor_bits[] = {
+                    MEAS_VALID_PACK, MEAS_VALID_CHG, MEAS_VALID_CELLS,
+                    MEAS_VALID_TBAT, MEAS_VALID_TINV
+                };
+                for (int si = 0; si < 5; si++) {
+                    if (lost & sensor_bits[si]) {
+                        log_sensor_fault(&g_logger, si, (uint32_t)cur_valid);
+                        stats_inc_sensor_fault(&g_stats);
+                    }
+                    if (restored & sensor_bits[si])
+                        log_sensor_recovered(&g_logger, si, (uint32_t)cur_valid);
+                }
+                g_prev_meas_valid = cur_valid;
+            }
+
             _snapshot_update();
         }
 
@@ -979,23 +1030,35 @@ int main(void) {
 
             prot_check(&g_prot, &g_bat);
 
-            uint32_t new_alarms = g_prot.alarms & ~prev_alarms;
-            prev_alarms = g_prot.alarms;
+            uint32_t new_alarms;
+            {
+                uint32_t current_alarms = g_prot.alarms;
+                uint32_t cleared_alarms;
+                new_alarms = current_alarms & ~prev_alarms;
+                cleared_alarms = prev_alarms & ~current_alarms;
 
-            if (new_alarms) {
-                if (new_alarms & (ALARM_TEMP_CUT | ALARM_INV_CUT)) {
-                    buz_play(&g_buz, BUZ_TEMP_CUT);
-                } else if (new_alarms & (ALARM_TEMP_SAFE | ALARM_INV_SAFE)) {
-                    buz_play(&g_buz, BUZ_ALARM_CRIT);
-                } else if (new_alarms & ALARM_TEMP_BUZZ) {
-                    buz_play(&g_buz, BUZ_TEMP_WARN);
-                } else if (prot_has_critical(&g_prot)) {
-                    buz_play(&g_buz, BUZ_ALARM_CRIT);
-                } else if (prot_has_warning(&g_prot)) {
-                    buz_play(&g_buz, BUZ_ALARM_WARN);
+                if (new_alarms) {
+                    if (new_alarms & (ALARM_TEMP_CUT | ALARM_INV_CUT)) {
+                        buz_play(&g_buz, BUZ_TEMP_CUT);
+                    } else if (new_alarms & (ALARM_TEMP_SAFE | ALARM_INV_SAFE)) {
+                        buz_play(&g_buz, BUZ_ALARM_CRIT);
+                    } else if (new_alarms & ALARM_TEMP_BUZZ) {
+                        buz_play(&g_buz, BUZ_TEMP_WARN);
+                    } else if (prot_has_critical(&g_prot)) {
+                        buz_play(&g_buz, BUZ_ALARM_CRIT);
+                    } else if (prot_has_warning(&g_prot)) {
+                        buz_play(&g_buz, BUZ_ALARM_WARN);
+                    }
+                    log_alarm_enter(&g_logger, new_alarms,
+                                    snap.display_soc_pct, snap.voltage, snap.temp_bat);
                 }
-                log_alarm(&g_logger, g_prot.alarms,
-                          snap.display_soc_pct, snap.voltage, snap.temp_bat);
+
+                if (cleared_alarms) {
+                    log_alarm_exit(&g_logger, cleared_alarms,
+                                   snap.display_soc_pct, snap.voltage, snap.temp_bat);
+                }
+
+                prev_alarms = current_alarms;
             }
 
             stats_update(&g_stats,

@@ -121,6 +121,10 @@
 #define ESP_LINK_TIMEOUT_MS     15000
 #define ESP_RX_LINE_MAX         384
 
+// Local timezone offset for ETA display (seconds, applied to epoch time)
+// Kyiv summer time (UTC+3) default; adjust if deploying in other TZ.
+#define ETA_TZ_OFFSET_SEC       (3 * 3600)
+
 // Protection thresholds
 #define SOC_WARN_PCT        20
 #define SOC_CUTOFF_PCT      5

@@ -42,12 +42,14 @@ static const char PSTATION_WEB_UI[] PROGMEM = R"HTML(
 .bat-pct{position:absolute;left:0;top:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:800;color:#fff;text-shadow:0 1px 4px rgba(0,0,0,.6);font-family:var(--mono)}
 .bat-info{text-align:left}.bat-info .bi-row{font-size:14px;color:var(--muted);margin-bottom:6px}.bat-info .bi-row b{color:var(--text);font-size:16px}
 
-/* SPARKLINE */
-.spark-wrap{position:relative}.spark{width:100%;height:80px}
-.spark-axis{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);font-family:var(--mono);padding:0 4px}
-.range-sel{display:flex;gap:4px;margin-bottom:8px}
-.range-btn{border:1px solid var(--border);background:var(--surface2);color:var(--muted);border-radius:6px;padding:4px 10px;font-size:11px;font-weight:600;cursor:pointer}
-.range-btn.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+/* BAR GAUGES */
+.bar-card{display:flex;flex-direction:column;gap:6px}
+.bar-caption{font-size:11px;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.5px}
+.bar-value{font-size:22px;font-weight:800;color:var(--text);line-height:1}
+.bar-shell{position:relative;height:18px;border-radius:10px;background:#e6e9f0;overflow:hidden}
+.bar-fill{height:100%;width:0;border-radius:10px;min-width:4px;transition:width .25s ease}
+.bar-ticks{position:absolute;inset:0;display:flex;justify-content:space-between;align-items:center;padding:0 4px;pointer-events:none}
+.bar-ticks span{width:2px;height:10px;background:#c4cad4;border-radius:2px}
 
 /* CHIPS */
 .chip{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid var(--border);background:var(--surface2)}
@@ -87,10 +89,14 @@ static const char PSTATION_WEB_UI[] PROGMEM = R"HTML(
 .ev-badge.boot{background:var(--primary-soft);color:var(--primary)}.ev-badge.charge{background:var(--success-soft);color:var(--success)}
 .ev-badge.discharge{background:var(--warning-soft);color:#92650b}.ev-badge.alarm{background:var(--danger-soft);color:var(--danger)}
 .ev-badge.other{background:var(--surface2);color:var(--muted)}
-.ev-count{font-size:12px;color:var(--muted)}.ev-items{display:grid;gap:6px}
-.ev-row{display:grid;grid-template-columns:80px 1fr;gap:8px;padding:8px 12px;border-radius:8px;background:var(--surface2);border:1px solid var(--border);font-size:13px}
-.ev-row .ev-time{color:var(--muted);font-family:var(--mono);font-size:12px}.ev-row .ev-detail{display:flex;flex-wrap:wrap;gap:6px 14px}
-.ev-row .ev-detail span{color:var(--muted)}.ev-row .ev-detail b{color:var(--text)}
+.ev-count{font-size:12px;color:var(--muted)}.ev-items{display:block}
+.ev-table{width:100%;border-collapse:collapse;font-size:13px}
+.ev-table th,.ev-table td{border:1px solid var(--border);padding:8px 10px;text-align:left}
+.ev-table th{background:var(--surface2);color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+.ev-table tbody tr:nth-child(even){background:#f9fbfd}
+.ev-time{color:var(--muted);font-family:var(--mono);font-size:12px;white-space:nowrap}
+.ev-detail{display:flex;flex-wrap:wrap;gap:6px 12px}
+.ev-detail span{color:var(--muted)}.ev-detail b{color:var(--text)}
 .alarm-tag{display:inline-block;padding:1px 6px;border-radius:999px;font-size:10px;font-family:var(--mono);background:var(--danger-soft);color:var(--danger);border:1px solid #f5c6c6}
 .ev-actions{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
 .ev-pg{display:flex;gap:6px;align-items:center}
@@ -135,7 +141,8 @@ static const char PSTATION_WEB_UI[] PROGMEM = R"HTML(
   <span class="sv"><span>A</span> <b id="s-amp">--</b></span><span class="sep">|</span>
   <span class="sv amber"><span>W</span> <b id="s-pwr">--</b></span><span class="sep">|</span>
   <span class="sv"><span>BAT</span> <b id="s-tbat">--</b></span><span class="sep">|</span>
-  <span class="sv"><span>WiFi</span> <b id="s-wifi">--</b></span>
+  <span class="sv"><span>WiFi</span> <b id="s-wifi">--</b></span><span class="sep">|</span>
+  <span class="sv" id="s-ntp-wrap"><span>NTP</span> <b id="s-ntp">--</b></span>
 </div>
 
 <!-- NAVIGATION TABS -->
@@ -174,13 +181,15 @@ static const char PSTATION_WEB_UI[] PROGMEM = R"HTML(
     <div class="mt"><label>State</label><div class="mv" data-bind="charging-state">--</div></div>
   </div>
   <div class="grid2" style="margin-top:12px">
-    <div class="card"><h3>SOC Trend</h3>
-      <div class="range-sel" data-chart="soc"><button class="range-btn" data-r="3600">1 Hour</button><button class="range-btn active" data-r="21600">6 Hours</button><button class="range-btn" data-r="86400">Day</button></div>
-      <div class="spark-wrap"><svg class="spark" id="chart-soc"></svg><div class="spark-axis" id="axis-soc"></div></div>
+    <div class="card bar-card">
+      <div class="bar-caption">State of Charge</div>
+      <div class="bar-shell"><div class="bar-fill" id="bar-soc"></div><div class="bar-ticks"><span></span><span></span><span></span></div></div>
+      <div class="bar-value" id="bar-soc-val">--%</div>
     </div>
-    <div class="card"><h3>Power Trend</h3>
-      <div class="range-sel" data-chart="power"><button class="range-btn" data-r="3600">1 Hour</button><button class="range-btn active" data-r="21600">6 Hours</button><button class="range-btn" data-r="86400">Day</button></div>
-      <div class="spark-wrap"><svg class="spark" id="chart-power"></svg><div class="spark-axis" id="axis-power"></div></div>
+    <div class="card bar-card">
+      <div class="bar-caption">Power</div>
+      <div class="bar-shell"><div class="bar-fill" id="bar-power"></div><div class="bar-ticks"><span></span><span></span><span></span></div></div>
+      <div class="bar-value" id="bar-power-val">--</div>
     </div>
   </div>
   <div class="card">
@@ -223,6 +232,7 @@ static const char PSTATION_WEB_UI[] PROGMEM = R"HTML(
       <div class="mt"><label>AP IP</label><div class="mv" data-bind="ap-ip">--</div></div>
       <div class="mt"><label>STA IP</label><div class="mv" data-bind="sta-ip">--</div></div>
       <div class="mt"><label>Status</label><div class="mv" data-bind="status">--</div></div>
+      <div class="mt"><label>Time Sync</label><div class="mv" data-bind="ntp-status">--</div></div>
     </div>
   </div>
   <div class="shut-zone">
@@ -379,14 +389,15 @@ static const char PSTATION_WEB_UI[] PROGMEM = R"HTML(
 <div class="toast-area" id="toasts"></div>
 
 <script>
-const PAGE_SIZE=16;
-const state={route:'dashboard',telemetry:null,system:null,stats:null,logs:null,ports:null,history:{soc:[],power:[]},chartRange:{soc:21600,power:21600},ntpTimer:null};
+const PAGE_SIZE=8;
+const state={route:'dashboard',telemetry:null,system:null,stats:null,logs:null,ports:null,ntpTimer:null};
 let logPage=0;
 
 function $(id){return document.getElementById(id)}
 function fixed(v,d,s){return v==null?'--':(Number(v).toFixed(d)+(s||''))}
 function clamp(v,lo,hi){return Math.max(lo,Math.min(hi,v))}
 function minutesToLabel(m){if(m==null)return'--';const h=Math.floor(m/60),mm=m%60;return h>0?h+'h '+mm+'m':mm+'m'}
+function timeLabel(epoch){if(!epoch||epoch<1700000000)return'NO SYNC';const d=new Date(epoch*1000);return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});}
 
 function setBind(name,val){document.querySelectorAll('[data-bind="'+name+'"]').forEach(el=>{el.textContent=val})}
 
@@ -394,23 +405,23 @@ function toast(title,msg,tone){const d=document.createElement('div');d.className
 
 async function api(url,opts){if(!opts)opts={};opts.credentials='same-origin';const r=await fetch(url,opts);if(r.status===401){location.reload();throw new Error('Auth required')}if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}
 
-/* SPARKLINE WITH TIME AXIS */
-function sparkTime(id,axisId,samples,rangeSec,color,mn,mx){
-  const el=$(id),ax=$(axisId);if(!samples||!samples.length){el.innerHTML='';if(ax)ax.innerHTML='';return}
-  const now=Date.now()/1000,cutoff=now-rangeSec;
-  const pts=samples.filter(s=>s.t>=cutoff);
-  if(!pts.length){el.innerHTML='';if(ax)ax.innerHTML='';return}
-  const w=el.clientWidth||200,h=el.clientHeight||60,pad=2;
-  const vals=pts.map(s=>s.v),lo=mn!=null?mn:Math.min(...vals),hi=mx!=null?mx:Math.max(...vals),range=hi-lo||1;
-  const t0=pts[0].t,t1=pts[pts.length-1].t,tRange=t1-t0||1;
-  let path='';pts.forEach((s,i)=>{const x=pad+(s.t-t0)/tRange*(w-2*pad),y=h-pad-(s.v-lo)/range*(h-2*pad);path+=(i?'L':'M')+x.toFixed(1)+','+y.toFixed(1)});
-  el.innerHTML='<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none"><path d="'+path+'" fill="none" stroke="'+color+'" stroke-width="2"/></svg>';
-  if(ax){const fmt=s=>{const d=new Date(s*1000),hh=String(d.getHours()).padStart(2,'0'),mm=String(d.getMinutes()).padStart(2,'0');return hh+':'+mm};
-    const labels=3,step=tRange/(labels-1);let lh='';for(let i=0;i<labels;i++)lh+='<span>'+fmt(t0+step*i)+'</span>';ax.innerHTML=lh}
+/* ARC GAUGE */
+function setBar(id,frac,color,text){
+  const fill=$(id);if(!fill)return;
+  fill.style.width=(Math.max(0,Math.min(1,frac))*100)+'%';
+  fill.style.background=color;
+  const v=$(id+'-val');if(v)v.textContent=text;
 }
-function updateCharts(){
-  sparkTime('chart-soc','axis-soc',state.history.soc,state.chartRange.soc,'#22c55e',0,100);
-  sparkTime('chart-power','axis-power',state.history.power,state.chartRange.power,'#3b82f6');
+function updateGauges(){
+  const t=state.telemetry;if(!t)return;
+  const soc=clamp(t.soc_pct||0,0,100);
+  const socColor=soc>50?'#22c55e':soc>20?'#eab308':'#ef4444';
+  setBar('bar-soc',soc/100,socColor,Math.round(soc)+'%');
+  const pw=t.power_w||0,pwMax=200;
+  const frac=Math.min(Math.abs(pw)/pwMax,1);
+  const pwColor=pw>140?'#ef4444':pw>70?'#eab308':'#3b82f6';
+  const pwLabel=(t.charging?'+':'')+pw.toFixed(0)+'W';
+  setBar('bar-power',frac,pwColor,pwLabel);
 }
 
 /* STATUS BAR */
@@ -418,7 +429,11 @@ function updateStatusBar(t,s){
   if(t){$('s-soc').textContent=fixed(t.soc_pct,0,'%');$('s-volt').textContent=fixed(t.voltage_v,1,'V');$('s-amp').textContent=fixed(t.current_a,1,'A');$('s-pwr').textContent=fixed(t.power_w,0,'W');$('s-tbat').textContent=fixed(t.temp_bat_c,0,'°C');
     const soc=t.soc_pct||0;$('s-soc').parentElement.className='sv '+(soc>50?'green':soc>20?'amber':'red');$('s-pwr').parentElement.className='sv '+(t.power_w>50?'amber':'');
   }
-  if(s){$('s-wifi').textContent=s.wifi_mode||'--';const on=!!s.link_up;$('s-dot').className='dot'+(on?' on':' warn')}
+  if(s){
+    $('s-wifi').textContent=s.wifi_mode||'--';const on=!!s.link_up;$('s-dot').className='dot'+(on?' on':' warn');
+    const ntpWrap=$('s-ntp-wrap');const ntpText=(s.ntp_enabled===false)?'OFF':(s.ntp_synced?timeLabel(s.ntp_epoch):'NO SYNC');
+    $('s-ntp').textContent=ntpText;ntpWrap.className='sv '+(s.ntp_synced?'green':'red');
+  }
 }
 
 /* BATTERY VISUAL */
@@ -436,10 +451,7 @@ function renderTelemetry(d){state.telemetry=d;
   setBind('runtime',minutesToLabel(d.time_min));setBind('available-wh',fixed(d.available_wh,1,' Wh'));
   setBind('temp-bat',fixed(d.temp_bat_c,1,' °C'));setBind('temp-sys',fixed(d.temp_inv_c,1,' °C'));
   setBind('charging-state',d.charging?'Charging':'Idle');
-  const ts=Date.now()/1000;state.history.soc.push({t:ts,v:d.soc_pct});state.history.power.push({t:ts,v:d.power_w});
-  const maxKeep=86400;while(state.history.soc.length>0&&state.history.soc[0].t<ts-maxKeep)state.history.soc.shift();
-  while(state.history.power.length>0&&state.history.power[0].t<ts-maxKeep)state.history.power.shift();
-  updateCharts();
+  updateGauges();
   renderBattery(d);updateStatusBar(d,null);
 }
 function renderSystem(d){state.system=d;
@@ -447,6 +459,8 @@ function renderSystem(d){state.system=d;
   setBind('ap-ip',d.ap_ip||'--');setBind('sta-ip',d.sta_ip||'--');setBind('status',d.status||'--');
   setBind('hello-counter',d.hello_counter??'--');setBind('telemetry-counter',d.telemetry_counter??'--');
   setBind('stats-counter',d.stats_counter??'--');setBind('ack-counter',d.ack_counter??'--');setBind('error-counter',d.error_counter??'--');
+  const ntp=d.ntp_enabled===false?'NTP off':(d.ntp_synced?('Synced '+timeLabel(d.ntp_epoch)): 'No sync');
+  setBind('ntp-status',ntp);
   updateStatusBar(null,d);
   $('ind-link').className='idot'+(d.link_up?' on':' off');
 }
@@ -509,15 +523,17 @@ function renderLogs(p){state.logs=p;const total=p.total||0;
   $('ev-page-info').textContent=total?((logPage*PAGE_SIZE+1)+'-'+Math.min((logPage+1)*PAGE_SIZE,total)+' / '+total):'empty';
   const list=$('ev-list');
   if(!p.events||!p.events.length){list.innerHTML='<div class="note">No events.</div>';return}
-  let html='';p.events.forEach(e=>{
+  let rows='';p.events.forEach(e=>{
     const name=e.kind_name||('type_'+e.kind),bc=evBadge(name);
+    const time='#'+(e.seq!=null?e.seq:e.idx)+' '+(e.time||e.uptime||'');
     let det='<span>SOC</span> <b>'+(e.soc_pct??'--')+'%</b>';
-    if(e.voltage_v)det+=' <span>V</span> <b>'+fixed(e.voltage_v,2)+'</b>';
-    if(e.current_a)det+=' <span>A</span> <b>'+fixed(e.current_a,2)+'</b>';
+    if(e.voltage_v!=null)det+=' <span>V</span> <b>'+fixed(e.voltage_v,2)+'</b>';
+    if(e.current_a!=null)det+=' <span>A</span> <b>'+fixed(e.current_a,2)+'</b>';
     if(e.param&&e.param!==0){const u=e.param_label==='energy_wh'?' Wh':e.param_label==='temperature'?' °C':'';det+=' <span>'+(e.param_label||'val')+'</span> <b>'+fixed(e.param,1,u)+'</b>'}
     let alarms='';if(e.alarm_names&&e.alarm_names!=='none')alarms=' '+e.alarm_names.split(',').map(n=>'<span class="alarm-tag">'+n.trim()+'</span>').join(' ');
-    html+='<div class="ev-row"><div class="ev-time"><span class="ev-badge '+bc+'" style="font-size:10px;padding:2px 6px">'+name+'</span><br>#'+(e.seq!=null?e.seq:e.idx)+' '+(e.time||e.uptime||'')+'</div><div class="ev-detail">'+det+alarms+'</div></div>'});
-  list.innerHTML=html;
+    rows+='<tr><td class="ev-time">'+time+'</td><td><span class="ev-badge '+bc+'">'+name+'</span></td><td><div class="ev-detail">'+det+alarms+'</div></td></tr>';
+  });
+  list.innerHTML='<table class="ev-table"><thead><tr><th style="width:28%">Time</th><th style="width:18%">Type</th><th>Details</th></tr></thead><tbody>'+rows+'</tbody></table>';
 }
 
 /* SETTINGS */
@@ -608,7 +624,7 @@ document.addEventListener('DOMContentLoaded',async()=>{
   /* NTP form */
   $('ntp-form').addEventListener('submit',async ev=>{ev.preventDefault();const n=$('ntp-note');n.textContent='Saving...';try{const r=await api('/api/settings/network',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(new FormData(ev.target))});n.textContent=r.message||'Saved.';toast('NTP',n.textContent,r.ok?'success':'danger')}catch(e){n.textContent=e.message;toast('NTP',e.message,'danger')}});
   /* Chart range selectors */
-  document.querySelectorAll('.range-sel').forEach(sel=>{const chart=sel.dataset.chart;sel.querySelectorAll('.range-btn').forEach(btn=>{btn.addEventListener('click',()=>{sel.querySelectorAll('.range-btn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');state.chartRange[chart]=parseInt(btn.dataset.r);updateCharts()})})});
+  updateGauges();
   /* OTA */
   $('ota-form').addEventListener('submit',ev=>{ev.preventDefault();const file=$('ota-file').files[0],note=$('ota-note'),fill=$('ota-fill');if(!file){note.textContent='Choose .bin first';return}
     fill.style.width='0%';note.textContent='Uploading...';const fd=new FormData();fd.append('update',file);const x=new XMLHttpRequest();x.open('POST','/api/ota/upload');

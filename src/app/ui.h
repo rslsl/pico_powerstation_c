@@ -97,15 +97,19 @@ typedef struct {
     uint32_t log_total;
     struct {
         uint32_t timestamp_s;
-        uint8_t type;
-        uint8_t soc_pct;
-        uint8_t temp_bat;
-        float voltage;
-        float current;
-        float param;
-        uint32_t alarm_flags;
+        uint8_t  type;
+        uint8_t  category;
+        uint8_t  soc_pct;
+        uint8_t  temp_bat;
+        float    voltage;
+        float    current;
+        float    value1;
+        uint16_t code;
+        uint8_t  aux;
+        uint32_t flags;
     } log_cache[8];
     uint8_t log_cache_n;
+    uint8_t log_filter;   /* 0=ALL, 1..4 = LOG_CAT_SYSTEM..LOG_CAT_DATA */
 
     uint8_t scan_found[8][16];
     uint8_t scan_counts[8];
