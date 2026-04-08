@@ -27,6 +27,7 @@ typedef struct __attribute__((packed)) {
 _Static_assert(sizeof(LogHeaderPrefix) <= LOG_PAGE_SIZE, "Log header must fit one page");
 
 static volatile bool g_brownout = false;
+static volatile uint32_t g_epoch_offset = 0;  /* epoch - uptime_s at SET TIME */
 
 static bool _seq_is_newer(uint32_t a, uint32_t b) {
     return (int32_t)(a - b) > 0;
@@ -181,6 +182,17 @@ void log_set_brownout(bool state) {
     if (state) printf("[LOG] brownout - writes disabled\n");
 }
 
+void log_set_epoch(uint32_t epoch) {
+    uint32_t uptime = (uint32_t)(to_ms_since_boot(get_absolute_time()) / 1000u);
+    g_epoch_offset = epoch - uptime;
+    printf("[LOG] epoch synced: %lu (offset=%lu)\n",
+           (unsigned long)epoch, (unsigned long)g_epoch_offset);
+}
+
+bool log_has_epoch(void) {
+    return g_epoch_offset != 0;
+}
+
 void log_init(BmsLogger *l) {
     memset(l, 0, sizeof(*l));
     _page_reset(l);
@@ -206,6 +218,7 @@ void log_write(BmsLogger *l, const LogEvent *ev) {
     if (!l || !ev || g_brownout) return;
 
     ev_crc = *ev;
+    ev_crc.seq = l->total_events;  /* monotonic event counter */
     ev_crc.crc = 0u;
     ev_crc.crc = nvm_crc32(&ev_crc, sizeof(LogEvent));
 
@@ -278,7 +291,8 @@ void log_reset(BmsLogger *l) {
 }
 
 static uint32_t _ts(void) {
-    return (uint32_t)(to_ms_since_boot(get_absolute_time()) / 1000u);
+    uint32_t uptime = (uint32_t)(to_ms_since_boot(get_absolute_time()) / 1000u);
+    return g_epoch_offset ? (uptime + g_epoch_offset) : uptime;
 }
 
 void log_boot(BmsLogger *l, float soc, float v) {

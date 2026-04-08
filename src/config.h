@@ -76,6 +76,7 @@
 
 // Power sequencing
 #define EARLY_CONSOLE_SETTLE_MS 100
+#define USB_BOOT_LOG_WAIT_MS  2000
 #define PWR_BOOTSTRAP_DELAY_MS 1500
 #define PWR_HOLD_ASSERT_MS   30
 #define PWR_LATCH_SETTLE_MS  350
@@ -104,6 +105,21 @@
 #define BUZZER_PIN          12
 #define BUZZER_ON           1
 #define BUZZER_OFF          0
+
+// ESP32-S2 auxiliary module
+// GPIO_ESP_EN should drive an enable pin or regulator gate, not power VCC directly.
+#define ESP_UART_TX_PIN         20
+#define ESP_UART_RX_PIN         21
+#define GPIO_ESP_EN             22
+#define ESP_EN_ON               1
+#define ESP_EN_OFF              0
+#define ESP_UART_BAUD_HZ        115200
+#define ESP_BOOT_SETTLE_MS      400
+#define ESP_POST_BOOT_DELAY_MS  2500
+#define ESP_HELLO_INTERVAL_MS   2000
+#define ESP_TELEMETRY_INTERVAL_MS 1000
+#define ESP_LINK_TIMEOUT_MS     15000
+#define ESP_RX_LINE_MAX         384
 
 // Protection thresholds
 #define SOC_WARN_PCT        20
@@ -182,6 +198,42 @@ CFG_STATIC_ASSERT((FLASH_RELAY_OFFSET_B % FLASH_SECTOR_SIZE) == 0, "Relay slot B
 CFG_STATIC_ASSERT((FLASH_LOG_OFFSET % FLASH_SECTOR_SIZE) == 0, "Log region must be sector-aligned");
 CFG_STATIC_ASSERT((FLASH_LOG_OFFSET + FLASH_LOG_SIZE) <= FLASH_RELAY_OFFSET_B,
                   "Log region must not overlap settings/relay sectors");
+
+// Future Pico OTA flash layout.
+// Current production build still boots as a monolithic image from flash base.
+// These offsets reserve a stable map for a future OTA loader + dual application slots.
+#define PICO_OTA_LOADER_OFFSET     0u
+#define PICO_OTA_LOADER_SIZE       (128u * 1024u)
+#define PICO_OTA_CTRL_OFFSET_A     (PICO_OTA_LOADER_SIZE - (2u * FLASH_SECTOR_SIZE))
+#define PICO_OTA_CTRL_OFFSET_B     (PICO_OTA_LOADER_SIZE - FLASH_SECTOR_SIZE)
+#define PICO_OTA_APP_REGION_OFFSET PICO_OTA_LOADER_SIZE
+#define PICO_OTA_APP_REGION_SIZE   (FLASH_LOG_OFFSET - PICO_OTA_APP_REGION_OFFSET)
+#define PICO_OTA_SLOT_SIZE         (PICO_OTA_APP_REGION_SIZE / 2u)
+#define PICO_OTA_SLOT_A_OFFSET     PICO_OTA_APP_REGION_OFFSET
+#define PICO_OTA_SLOT_B_OFFSET     (PICO_OTA_SLOT_A_OFFSET + PICO_OTA_SLOT_SIZE)
+#define PICO_OTA_UART_CHUNK_MAX    128u
+#define PICO_OTA_MAX_BOOT_ATTEMPTS 3u
+#define PICO_OTA_CONFIRM_DELAY_MS  15000u
+#define PICO_OTA_REBOOT_DELAY_MS   800u
+
+CFG_STATIC_ASSERT((PICO_OTA_LOADER_SIZE % FLASH_SECTOR_SIZE) == 0,
+                  "OTA loader reservation must be sector-aligned");
+CFG_STATIC_ASSERT((PICO_OTA_CTRL_OFFSET_A % FLASH_SECTOR_SIZE) == 0,
+                  "OTA control slot A must be sector-aligned");
+CFG_STATIC_ASSERT((PICO_OTA_CTRL_OFFSET_B % FLASH_SECTOR_SIZE) == 0,
+                  "OTA control slot B must be sector-aligned");
+CFG_STATIC_ASSERT((PICO_OTA_CTRL_OFFSET_B + FLASH_SECTOR_SIZE) <= PICO_OTA_LOADER_SIZE,
+                  "OTA control slots must fit inside the loader reservation");
+CFG_STATIC_ASSERT((PICO_OTA_APP_REGION_OFFSET % FLASH_SECTOR_SIZE) == 0,
+                  "OTA app region start must be sector-aligned");
+CFG_STATIC_ASSERT((PICO_OTA_APP_REGION_SIZE % (2u * FLASH_SECTOR_SIZE)) == 0,
+                  "OTA app region must split into two equal sector-aligned slots");
+CFG_STATIC_ASSERT((PICO_OTA_SLOT_A_OFFSET % FLASH_SECTOR_SIZE) == 0,
+                  "OTA slot A must be sector-aligned");
+CFG_STATIC_ASSERT((PICO_OTA_SLOT_B_OFFSET % FLASH_SECTOR_SIZE) == 0,
+                  "OTA slot B must be sector-aligned");
+CFG_STATIC_ASSERT((PICO_OTA_SLOT_B_OFFSET + PICO_OTA_SLOT_SIZE) == FLASH_LOG_OFFSET,
+                  "OTA slots must end before the persistent NVM tail");
 
 // ST7789 colors: canonical definitions are D_* in app/display.h.
 // COL_* removed — they were unused and had different values from D_*,

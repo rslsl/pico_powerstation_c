@@ -9,6 +9,7 @@
 #include "bms_ocv.h"
 #include "../config.h"
 #include "../app/power_control.h"
+#include "../app/runtime_policy.h"
 #include "../app/system_settings.h"
 #include "pico/stdlib.h"
 #include <stdio.h>
@@ -54,6 +55,52 @@ static float _eta_usable_energy_wh(Battery *bat,
     bat->eta_cutoff_soc = soc_cut;
     bat->eta_usable_wh = usable_soc * usable_ah * avg_v;
     return bat->eta_usable_wh;
+}
+
+static float _display_cutoff_soc(const SystemSettings *cfg, float temp_c) {
+    float cutoff_pack_v = fmaxf(cfg->vbat_cut_v, cfg->cell_cut_v * BAT_CELLS);
+    return _clamp(bms_ocv_pack_to_soc(cutoff_pack_v, temp_c), 0.0f, 0.98f);
+}
+
+static float _display_full_soc(const SystemSettings *cfg,
+                               float temp_c,
+                               float cutoff_soc) {
+    float full_soc = _clamp(bms_ocv_pack_to_soc(cfg->pack_full_v, temp_c), 0.0f, 1.0f);
+    if (!_finitef(full_soc) || full_soc <= (cutoff_soc + 0.02f)) {
+        full_soc = 1.0f;
+    }
+    return full_soc;
+}
+
+static void _update_display_metrics(Battery *bat,
+                                    float soc_frac,
+                                    float usable_ah,
+                                    float temp_c) {
+    const SystemSettings *cfg = settings_get();
+    float cutoff_soc;
+    float full_soc;
+    float soc_span;
+    float usable_soc;
+    float nominal_v;
+
+    if (!bat || !cfg) return;
+
+    cutoff_soc = _display_cutoff_soc(cfg, temp_c);
+    full_soc = _display_full_soc(cfg, temp_c, cutoff_soc);
+    soc_span = full_soc - cutoff_soc;
+    nominal_v = (_finitef(cfg->pack_nominal_v) && cfg->pack_nominal_v > 1.0f)
+        ? cfg->pack_nominal_v
+        : (BAT_CELLS * 3.7f);
+
+    if (!_finitef(soc_span) || soc_span < 0.02f) {
+        bat->display_soc_pct = _clamp(soc_frac * 100.0f, 0.0f, 100.0f);
+        bat->display_available_wh = fmaxf(soc_frac, 0.0f) * usable_ah * nominal_v;
+        return;
+    }
+
+    usable_soc = _clamp(soc_frac - cutoff_soc, 0.0f, soc_span);
+    bat->display_soc_pct = _clamp((usable_soc / soc_span) * 100.0f, 0.0f, 100.0f);
+    bat->display_available_wh = usable_soc * usable_ah * nominal_v;
 }
 
 static bool _sensor_vi_sane(float v, float i) {
@@ -176,11 +223,46 @@ void bat_apply_settings(Battery *bat, float capacity_ah) {
     bat->_eta_pause_s = PRED_RESET_IDLE_SECONDS;
     bat->eta_usable_wh = 0.0f;
     bat->eta_cutoff_soc = 0.0f;
+    _update_display_metrics(bat,
+                            _clamp(bat->soc / 100.0f, 0.0f, 1.0f),
+                            fmaxf(bat->soh_est.q_measured_ah, 0.1f),
+                            bat->temp_bat);
 }
 
 void bat_seed_predictor(Battery *bat, float baseline_power_w, float peukert_n) {
     if (!bat) return;
     pred_seed(&bat->pred, baseline_power_w, peukert_n);
+}
+
+void bat_cycle_begin(Battery *bat) {
+    if (!bat) return;
+    bat->soh_est._soc_dis_start_frac = _clamp(bat->soc / 100.0f, 0.0f, 1.0f);
+    bat->soh_est._ah_dis_session = 0.0f;
+    bat->soh_est._wh_dis_session = 0.0f;
+}
+
+void bat_cycle_end(Battery *bat) {
+    float temp_used;
+    float t_k;
+    float t_ref_k;
+    float factor;
+    float r0_soh;
+
+    if (!bat) return;
+
+    temp_used = bat_meas_fresh(bat, MEAS_VALID_TBAT) ? bat->temp_bat : 25.0f;
+    t_k = temp_used + 273.15f;
+    t_ref_k = EKF_T_REF + 273.15f;
+    factor = expf(EKF_KR * (1.0f / t_k - 1.0f / t_ref_k));
+    r0_soh = bat->ekf.r0;
+    if (_finitef(factor) && factor > 0.2f && factor < 5.0f) {
+        r0_soh /= factor;
+    }
+
+    soh_on_cycle_end(&bat->soh_est, r0_soh, _clamp(bat->soc / 100.0f, 0.0f, 1.0f));
+    bat->soh = bat->soh_est.soh * 100.0f;
+    bat->efc = bat->soh_est.efc;
+    bat->soh_rul_cycles = soh_rul_cycles(&bat->soh_est);
 }
 
 // ── Sensor read ──────────────────────────────────────────────
@@ -298,8 +380,8 @@ void bat_read_sensors(Battery *bat) {
     bat->temp_bat_status = _temp_status(bat->temp_bat, cfg->temp_bat_warn_c, cfg->temp_bat_safe_c);
     bat->temp_inv_status = _temp_status(bat->temp_inv, cfg->temp_inv_warn_c, cfg->temp_inv_safe_c);
     {
-        bool charge_enter = (bat->i_chg > 0.30f) && (bat->i_net < -0.15f);
-        bool charge_hold  = (bat->i_chg > 0.20f) && (bat->i_net < -0.05f);
+        bool charge_enter = runtime_policy_charge_enter(bat->i_chg, bat->i_net);
+        bool charge_hold  = runtime_policy_charge_hold(bat->i_chg, bat->i_net);
         bat->is_charging = bat->is_charging ? charge_hold : charge_enter;
     }
     bat->is_idle     = fabsf(bat->i_net) < OCV_IDLE_A;
@@ -387,39 +469,15 @@ void bat_update_bms(Battery *bat, float dt_s) {
     else if (chg_ok && bat->i_chg > 0.1f)
         soh_update_charge(&bat->soh_est, bat->i_chg, bat->voltage, dt_s);
 
-    uint32_t now_ms = _ms_now();
-    bool discharge_enter = !bat->is_charging && bat->i_net > 0.50f && bat->power_w > 5.0f;
-    bool discharge_hold = !bat->is_charging && bat->i_net > 0.40f && bat->power_w > 3.0f;
-    bool is_now_discharging = bat->_was_discharging ? discharge_hold : discharge_enter;
-    if (!bat->_was_discharging && is_now_discharging) {
-        bat->soh_est._soc_dis_start_frac = _clamp(bat->soc / 100.0f, 0.0f, 1.0f);
-        bat->soh_est._ah_dis_session = 0.0f;
-        bat->soh_est._wh_dis_session = 0.0f;
-        bat->_discharge_active_ms = now_ms;
-    }
-    if (bat->_was_discharging && !is_now_discharging) {
-        uint32_t dur_ms = (bat->_discharge_active_ms > 0u && now_ms > bat->_discharge_active_ms)
-                        ? (now_ms - bat->_discharge_active_ms)
-                        : 0u;
-        if (dur_ms >= 30000u) {
-            float t_k = temp_used + 273.15f;
-            float t_ref_k = EKF_T_REF + 273.15f;
-            float factor = expf(EKF_KR * (1.0f / t_k - 1.0f / t_ref_k));
-            float r0_soh = bat->ekf.r0;
-            if (_finitef(factor) && factor > 0.2f && factor < 5.0f) {
-                r0_soh /= factor;
-            }
-            soh_on_cycle_end(&bat->soh_est, r0_soh, bat->soc / 100.0f);
-        }
-        bat->_discharge_active_ms = 0u;
-    }
-    bat->_was_discharging = is_now_discharging;
-
     bat->soh = bat->soh_est.soh * 100.0f;
     bat->efc = bat->soh_est.efc;
     bat->soh_rul_cycles = soh_rul_cycles(&bat->soh_est);
     float usable_ah = fmaxf(bat->soh_est.q_measured_ah, 0.1f);
+    float display_cutoff_soc = _display_cutoff_soc(cfg, temp_used);
+    float display_full_soc = _display_full_soc(cfg, temp_used, display_cutoff_soc);
+    uint32_t now_ms = _ms_now();
     bat->remaining_wh = soc_frac * usable_ah * cfg->pack_nominal_v;
+    _update_display_metrics(bat, soc_frac, usable_ah, temp_used);
 
     if (bat->is_charging && chg_ok) {
         pred_reset_runtime(&bat->pred);
@@ -428,7 +486,7 @@ void bat_update_bms(Battery *bat, float dt_s) {
         bat->eta_usable_wh = 0.0f;
         bat->eta_cutoff_soc = _clamp(soc_frac, 0.0f, 1.0f);
         float net_charge_a = fmaxf(-bat->i_net, 0.0f);
-        float remain_ah = fmaxf((1.0f - soc_frac) * usable_ah, 0.0f);
+        float remain_ah = fmaxf((display_full_soc - soc_frac) * usable_ah, 0.0f);
         bat->pred_confidence = 0.0f;
         if (net_charge_a > 0.15f && remain_ah > 0.01f) {
             float taper = (soc_frac > 0.90f) ? 1.25f : (soc_frac > 0.80f ? 1.12f : 1.05f);
@@ -437,8 +495,8 @@ void bat_update_bms(Battery *bat, float dt_s) {
             bat->time_min = 9999;
         }
     } else {
-        bool discharge_enter = !bat->is_charging && bat->i_net > 0.50f && bat->power_w > 5.0f;
-        bool discharge_hold  = !bat->is_charging && bat->i_net > 0.40f && bat->power_w > 3.0f;
+        bool discharge_enter = runtime_policy_discharge_enter(bat->is_charging, bat->i_net, bat->power_w);
+        bool discharge_hold  = runtime_policy_discharge_hold(bat->is_charging, bat->i_net, bat->power_w);
         bool discharge_eta_active = bat->_eta_discharging ? discharge_hold : discharge_enter;
 
         if (discharge_eta_active) {
@@ -527,6 +585,8 @@ void bat_snapshot(const Battery *bat, BatSnapshot *out) {
     out->soc         = bat->soc;
     out->soc_std     = bat->soc_std;
     out->remaining_wh= bat->remaining_wh;
+    out->display_soc_pct = bat->display_soc_pct;
+    out->display_available_wh = bat->display_available_wh;
     out->r0_mohm     = bat->r0_mohm;
     out->soh         = bat->soh;
     out->efc         = bat->efc;

@@ -92,14 +92,15 @@ void st7789_draw_rgb565(ST7789 *dev, int x, int y, int w, int h, const uint16_t 
     if (!dev || !dev->impl || !pixels || x < 0 || y < 0 || w <= 0 || h <= 0) return;
     static uint8_t rowbuf[ST7789_W * 2];
     ST7789_TFT &tft = st_impl(dev)->tft;
+    int clamped_w = (w > ST7789_W) ? ST7789_W : w;
     for (int row = 0; row < h; ++row) {
         const uint16_t *src = pixels + row * w;
-        for (int i = 0; i < w; ++i) {
+        for (int i = 0; i < clamped_w; ++i) {
             uint16_t c = src[i];
             rowbuf[2 * i] = (uint8_t)(c >> 8);
             rowbuf[2 * i + 1] = (uint8_t)(c & 0xFF);
         }
-        tft.TFTdrawBitmap16Data((uint16_t)x, (uint16_t)(y + row), rowbuf, (uint16_t)w, 1);
+        tft.TFTdrawBitmap16Data((uint16_t)x, (uint16_t)(y + row), rowbuf, (uint16_t)clamped_w, 1);
     }
 }
 

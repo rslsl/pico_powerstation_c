@@ -1,29 +1,7 @@
-# Raspberry Pi Pico / CMake build output
-/build/
-/output/
-cmake-build-*/
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-compile_commands.json
-*.ninja
-*.ninja_deps
-*.ninja_log
-
-# Firmware and object artifacts
-*.o
-*.obj
-*.a
-*.bin
-*.elf
-*.uf2
-*.hex
-*.map
-*.dis
-*.log
-*.tmp
-*.bak
-
-# IDE settings
+build/
+*.rar
 .vscode/
-.idea/
+*.pyc
+__pycache__/
+tmp/
+.claude/

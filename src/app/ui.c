@@ -34,10 +34,10 @@ static const UiState _PARENT[S_COUNT] = {
     S_MAIN, S_MAIN, S_MAIN, S_ADVANCED, S_MAIN,
     S_PORTS, S_UI_CFG, S_UI_CFG, S_UI_CFG, S_CAL_CFG,
     S_CAL_ITEM, S_UI_CFG, S_UI_CFG, S_ADVANCED, S_ADVANCED,
-    S_ADVANCED,
+    S_ADVANCED, S_ADVANCED, S_MAIN,
 };
-static const bool _IS_INFO[S_COUNT] = {1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0};
-static const bool _IS_MENU[S_COUNT] = {0,0,0,0,1,1,1,1,1,1,0,1,1,0,0,0};
+static const bool _IS_INFO[S_COUNT] = {1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static const bool _IS_MENU[S_COUNT] = {0,0,0,0,1,1,1,1,1,1,0,1,1,0,0,0,1,0};
 static const PortId _PORT_MENU_IDS[] = {
     PORT_DC_OUT, PORT_USB_PD, PORT_FAN
 };
@@ -70,6 +70,7 @@ typedef enum {
 } CalTarget;
 
 static void _rs_publish(UI *ui);
+static float _display_soc_pct(const BatSnapshot *b, const SystemSettings *cfg);
 
 static bool _finitef_ui(float v) {
     return !isnan(v) && !isinf(v);
@@ -86,6 +87,13 @@ static BuzzerPreset _step_buzzer_preset(BuzzerPreset preset, int dir) {
     return (BuzzerPreset)next;
 }
 
+static EspMode _step_esp_mode(EspMode mode, int dir) {
+    int next = (int)mode + ((dir > 0) ? 1 : -1);
+    if (next < 0) next = ESP_MODE_COUNT - 1;
+    if (next >= ESP_MODE_COUNT) next = 0;
+    return (EspMode)next;
+}
+
 static CalSensor _clampf_cal_sensor(uint8_t sensor) {
     return (sensor < CAL_SENSOR_COUNT) ? (CalSensor)sensor : CAL_SENSOR_DISCHARGE;
 }
@@ -95,7 +103,7 @@ static CalTarget _clampf_cal_target(uint8_t target) {
 }
 
 static bool _can_hold_poweroff(UiState s) {
-    return s == S_MAIN || s == S_STATS || s == S_BATTERY || s == S_DIAGNOSTICS;
+    return s == S_MAIN || s == S_STATS || s == S_BATTERY || s == S_DIAGNOSTICS || s == S_OTA;
 }
 
 static void _poweroff_audio_reset(UI *ui) {
@@ -377,7 +385,8 @@ static int _menu_len(const UI *ui, UiState s) {
         case S_CAL_CFG:  return CAL_SENSOR_COUNT;
         case S_CAL_ITEM: return _cal_menu_count(_clampf_cal_sensor(ui->cal_sensor));
         case S_DATA_CFG: return 3;
-        case S_ADVANCED: return 4;
+        case S_ADVANCED: return 5;
+        case S_ESP_CFG:  return 1;
         default:         return 1;
     }
 }
@@ -450,6 +459,13 @@ static bool _adjust_setting(UI *ui, int dir) {
             _rs_publish(ui);
             return true;
         }
+
+        case S_ESP_CFG:
+            if (sel == 0) {
+                cfg.esp_mode = (uint8_t)_step_esp_mode((EspMode)cfg.esp_mode, dir);
+                return _settings_apply(ui, &cfg, false, "ESP mode updated");
+            }
+            return false;
 
         default:
             return false;
@@ -628,6 +644,27 @@ static void _rs_publish(UI *ui) {
     rs->startup_ok = ui->startup_ok;
     rs->charger_present = ui->pwr ? pwr_is_charger_present(ui->pwr) : false;
     rs->meas_valid = ui->snap ? ui->snap->meas_valid : 0;
+    rs->esp_mode = ui->esp ? (uint8_t)esp_mode_get(ui->esp) : ESP_MODE_OFF;
+    rs->esp_powered = ui->esp ? esp_is_powered(ui->esp) : false;
+    rs->esp_link_up = ui->esp ? esp_is_link_up(ui->esp) : false;
+    rs->ntp_synced = log_has_epoch();
+    strncpy(rs->esp_status, ui->esp ? esp_status_text(ui->esp) : "OFF", sizeof(rs->esp_status) - 1u);
+    rs->esp_status[sizeof(rs->esp_status) - 1u] = '\0';
+
+    // ── OTA status ───────────────────────────────────────────
+    if (ui->esp) {
+        PicoOtaStatus ota_st;
+        pico_ota_fill_status(&ui->esp->ota, &ota_st);
+        rs->ota_state = (uint8_t)ota_st.state;
+        rs->ota_image_size = ota_st.image_size;
+        rs->ota_bytes_written = ota_st.bytes_written;
+        rs->ota_reboot_pending = ota_st.reboot_pending;
+        rs->ota_progress_pct = (ota_st.image_size > 0u)
+            ? (uint8_t)((uint64_t)ota_st.bytes_written * 100u / ota_st.image_size)
+            : 0u;
+        snprintf(rs->ota_version, sizeof(rs->ota_version), "%s", ota_st.version);
+        snprintf(rs->ota_error, sizeof(rs->ota_error), "%s", ota_st.last_error);
+    }
 
     // ── Stats summary (P1.7) ─────────────────────────────────
     if (ui->stats && ui->stats->initialized) {
@@ -700,7 +737,7 @@ static void _rs_publish(UI *ui) {
 
 // ── Init ─────────────────────────────────────────────────────
 void ui_init(UI *ui, Display *d, PowerControl *pwr, PowerSeq *pseq,
-             Buzzer *buz, BatSnapshot *snap, Protection *prot,
+             Buzzer *buz, EspManager *esp, BatSnapshot *snap, Protection *prot,
              BmsStats *stats, BmsLogger *logger,
              UiSettingsApplyFn apply_settings) {
     const SystemSettings *cfg = settings_get();
@@ -710,6 +747,7 @@ void ui_init(UI *ui, Display *d, PowerControl *pwr, PowerSeq *pseq,
     ui->pwr        = pwr;
     ui->pseq       = pseq;
     ui->buz        = buz;
+    ui->esp        = esp;
     ui->snap       = snap;
     ui->prot       = prot;
     ui->stats      = stats;
@@ -719,7 +757,7 @@ void ui_init(UI *ui, Display *d, PowerControl *pwr, PowerSeq *pseq,
     ui->dirty      = true;
     ui->brightness = 100u;
     ui->buzzer_en  = cfg->buzzer_preset != BUZ_PRESET_SILENT;
-    ui->soc_anim   = snap ? snap->soc : 50.0f;
+    ui->soc_anim   = snap ? _display_soc_pct(snap, cfg) : 50.0f;
     ui->blink      = true;
     ui->last_activity_ms = to_ms_since_boot(get_absolute_time());
     ui->blink_ms   = ui->last_activity_ms;
@@ -749,11 +787,15 @@ void ui_set_startup_ok(UI *ui, bool ok) {
 
 void ui_set_state(UI *ui, UiState s) {
     ui->state = s;
+    if (s == S_OTA) {
+        ui->screensaver_active = false;
+        ui->last_activity_ms = to_ms_since_boot(get_absolute_time());
+    }
     _rs_publish(ui);
 }
 
 void ui_refresh(UI *ui) {
-    if (ui->snap) ui->soc_anim = ui->snap->soc;
+    if (ui->snap) ui->soc_anim = _display_soc_pct(ui->snap, settings_get());
     _rs_publish(ui);
 }
 
@@ -784,8 +826,9 @@ static void _anim_tick(UI *ui, uint32_t now) {
     bool charging = ui->pwr && pwr_is_charger_present(ui->pwr) && ui->snap &&
                     ui->snap->is_charging && ui->snap->i_net < -0.15f;
     uint32_t idle_ms = now - ui->last_activity_ms;
-    bool want_saver = (charging && idle_ms >= UI_IDLE_SCREENSAVER_MS) ||
-                      (!charging && idle_ms >= UI_IDLE_DISCHARGE_SAVER_MS);
+    bool want_saver = (ui->state != S_OTA) &&
+                      ((charging && idle_ms >= UI_IDLE_SCREENSAVER_MS) ||
+                       (!charging && idle_ms >= UI_IDLE_DISCHARGE_SAVER_MS));
     if (want_saver != ui->screensaver_active) {
         ui->screensaver_active = want_saver;
         ui->dirty = true;
@@ -904,9 +947,14 @@ static void _click(UI *ui) {
             else if (c == 1) _go(ui, S_EVENTS);
             else if (c == 2) _go(ui, S_HISTORY);
             else if (c == 3) _start_scan(ui);
+            else if (c == 4) _go(ui, S_ESP_CFG);
             else _rs_publish(ui);
             break;
         }
+        case S_ESP_CFG:
+            ui->edit_active = true;
+            _rs_publish(ui);
+            break;
         case S_EVENTS:
         case S_HISTORY:
         case S_I2C_SCAN:
@@ -980,6 +1028,8 @@ void ui_poll(UI *ui) {
         } else
         if (ui->edit_active) {
             _adjust_setting(ui, nav_step > 0 ? 1 : -1);
+        } else if (ui->state == S_OTA) {
+            /* OTA screen: navigation locked */
         } else if (_IS_INFO[ui->state]) {
             int s = (int)ui->state + (nav_step > 0 ? 1 : -1);
             if (s < S_MAIN)        s = S_BATTERY;
@@ -1068,6 +1118,15 @@ static void _badge_stale(Display *d, const FullUiSnapshot *rs) {
 static void _badge_latched(Display *d, const FullUiSnapshot *rs) {
     if (!rs->latched_faults || rs->safe_mode) return;
     if (rs->blink) disp_text_right_safe(d, 2, "LATCHED", D_RED);
+}
+
+static const char *_esp_mode_ui_label(EspMode mode) {
+    switch (mode) {
+        case ESP_MODE_WEB: return "WEB UI";
+        case ESP_MODE_OTA: return "ESP OTA";
+        case ESP_MODE_OFF:
+        default:           return "OFF";
+    }
 }
 
 static void _fill_circle(Display *d, int cx, int cy, int r, uint16_t col) {
@@ -1194,6 +1253,28 @@ static float _clampf_ui(float v, float lo, float hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
+}
+
+static float _display_soc_pct_cfg(const SystemSettings *cfg,
+                                  float pack_v,
+                                  float fallback_pct) {
+    if (!cfg || !_finitef_ui(pack_v)) {
+        return _clampf_ui(fallback_pct, 0.0f, 100.0f);
+    }
+
+    if (!_finitef_ui(cfg->pack_full_v) || !_finitef_ui(cfg->vbat_cut_v) ||
+        cfg->pack_full_v <= (cfg->vbat_cut_v + 0.05f)) {
+        return _clampf_ui(fallback_pct, 0.0f, 100.0f);
+    }
+
+    return _clampf_ui((pack_v - cfg->vbat_cut_v) /
+                      (cfg->pack_full_v - cfg->vbat_cut_v) * 100.0f,
+                      0.0f, 100.0f);
+}
+
+static float _display_soc_pct(const BatSnapshot *b, const SystemSettings *cfg) {
+    if (!b) return 0.0f;
+    return _display_soc_pct_cfg(cfg, b->voltage, b->soc);
 }
 
 static int _text_w(const char *s, int scale) {
@@ -1447,6 +1528,38 @@ static void _draw_status_pill(Display *d, int x, int y, int w, int h,
     disp_fill_rect(d, x, y, w, h, fill);
     disp_rect(d, x, y, w, h, edge);
     _text_center_box(d, x, w, y + 4, on ? "ON" : "OFF", on ? D_GREEN : D_TEXT, 2);
+}
+
+static void _draw_wireless_saver_badge(Display *d, const FullUiSnapshot *rs) {
+    const EspMode mode = (EspMode)rs->esp_mode;
+    const bool active = rs->esp_powered && (mode == ESP_MODE_WEB || mode == ESP_MODE_OTA);
+    const uint16_t accent = (mode == ESP_MODE_OTA) ? UI_NEON_AMB : UI_NEON_GRN;
+    const uint16_t edge = rs->esp_link_up ? accent : UI_BLUE_DIM;
+    const uint16_t fill = rs->esp_link_up ? _accent_fill(accent) : UI_BG_PANEL2;
+    const uint16_t label_col = rs->esp_link_up ? D_WHITE : accent;
+    const uint16_t dot_col = rs->esp_link_up ? D_GREEN : D_ORANGE;
+    const char *label = _esp_mode_ui_label(mode);
+    const int w = 96;
+    const int h = 22;
+    const int x = D_SAFE_LEFT;
+    const int y = 10;
+
+    if (!active) return;
+
+    _draw_panel_box(d, x, y, w, h, edge, accent, fill, false);
+    _draw_icon(d, x + 6, y + 5, &UI_ICON_WIFI, label_col, 1);
+    disp_text(d, x + 22, y + 7, label, label_col);
+    _fill_circle(d, x + w - 12, y + h / 2, 3, dot_col);
+
+    /* NTP sync badge */
+    if (rs->ntp_synced) {
+        const int nx = x + w + 4;
+        const int nw = 38;
+        _draw_panel_box(d, nx, y, nw, h, UI_NEON_GRN, UI_NEON_GRN,
+                        _accent_fill(UI_NEON_GRN), false);
+        _draw_icon(d, nx + 4, y + 5, &UI_ICON_CLOCK, D_WHITE, 1);
+        disp_text(d, nx + 18, y + 7, "T", D_WHITE);
+    }
 }
 
 static void __attribute__((unused)) _draw_metric_card(Display *d, int x, int y, int w, int h,
@@ -1972,6 +2085,7 @@ static void _render_charge_saver_anim(Display *d, const FullUiSnapshot *rs) {
     char buf[32];
 
     _draw_grid_background(d);
+    _draw_wireless_saver_badge(d, rs);
 
     disp_ring_arc(d, cx, cy, ring_r, ring_th, 135.0f, 270.0f, frac,
                   UI_NEON_GRN, UI_BG_PANEL);
@@ -2039,6 +2153,7 @@ static void _render_discharge_saver_anim(Display *d, const FullUiSnapshot *rs) {
     }
 
     disp_fill(d, UI_BG_DARK);
+    _draw_wireless_saver_badge(d, rs);
 
     disp_ring_arc(d, cx, cy, ring_r, ring_th, 135.0f, 270.0f, frac,
                   ring_col, UI_BG_PANEL);
@@ -2085,6 +2200,7 @@ static void _render_discharge_saver_anim(Display *d, const FullUiSnapshot *rs) {
         disp_text_center_safe(d, h - 38, buf, D_SUBTEXT);
     }
 }
+
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -2456,8 +2572,8 @@ static void _render_main_ref(Display *d, const FullUiSnapshot *rs) {
     bool chg_input = _input_only_display_active(rs, b);
     float shown_power_w = _display_power_w(rs, b);
     float signed_current = _signed_current_a(b);
-    float volt_frac = _clampf_ui((b->voltage - rs->settings.pack_empty_v) /
-                                 (rs->settings.pack_full_v - rs->settings.pack_empty_v), 0.0f, 1.0f);
+    float display_soc = _display_soc_pct(b, &rs->settings);
+    float volt_frac = display_soc / 100.0f;
     float load_frac = _clampf_ui(b->i_dis / 60.0f, 0.0f, 1.0f);
     uint16_t volt_col = _meter_color(volt_frac, true);
     uint16_t cur_col = _meter_color(load_frac, false);
@@ -2480,7 +2596,7 @@ static void _render_main_ref(Display *d, const FullUiSnapshot *rs) {
     snprintf(tbat_buf, sizeof(tbat_buf), "%.0fC", b->temp_bat);
     snprintf(tsys_buf, sizeof(tsys_buf), "%.0fC", b->temp_inv);
     snprintf(volt_top, sizeof(volt_top), "%.1f", rs->settings.pack_full_v);
-    snprintf(volt_bottom, sizeof(volt_bottom), "%.1f", rs->settings.pack_empty_v);
+    snprintf(volt_bottom, sizeof(volt_bottom), "%.1f", rs->settings.vbat_cut_v);
     snprintf(amp_top, sizeof(amp_top), "60A");
     snprintf(amp_bottom, sizeof(amp_bottom), "0A");
 
@@ -2556,7 +2672,8 @@ static void _render_stats_ref(Display *d, const FullUiSnapshot *rs) {
     _draw_compact_center_card(d, 86, 92, 68, 28, "CELL 2", c2_buf, _meter_color(_clampf_ui((b->v_b2 - 3.0f) / 1.2f, 0.0f, 1.0f), true), false);
     _draw_compact_center_card(d, 160, 92, 68, 28, "CELL 3", c3_buf, _meter_color(_clampf_ui((b->v_b3 - 3.0f) / 1.2f, 0.0f, 1.0f), true), false);
 
-    _draw_compact_center_card(d, 12, 132, 216, 40, "PACK VOLTAGE", volt_buf, _soc_color(b->soc), true);
+    _draw_compact_center_card(d, 12, 132, 216, 40, "PACK VOLTAGE", volt_buf,
+                              _soc_color(_display_soc_pct(b, &rs->settings)), true);
     _draw_compact_center_card(d, 12, 180, 104, 34, "CURRENT", current_buf, io_col, true);
     _draw_compact_center_card(d, 124, 180, 104, 34, "POWER", power_buf, io_col, true);
     _draw_compact_center_card(d, 12, 220, 104, 34, "ENERGY", energy_buf, D_ACCENT, true);
@@ -2936,8 +3053,130 @@ static void _render_advanced_ref(Display *d, const FullUiSnapshot *rs) {
     _draw_list_card(d, 12, 82, 216, 30, "EVENT HISTORY", "OPEN", UI_NEON_BLUE, sel == 1);
     _draw_list_card(d, 12, 120, 216, 30, "LIFETIME STATS", "OPEN", UI_NEON_AMB, sel == 2);
     _draw_list_card(d, 12, 158, 216, 30, "SENSOR SCAN", "OPEN", UI_NEON_BLUE, sel == 3);
-    _draw_list_card(d, 12, 214, 216, 22, "ACTION", "OK TO OPEN", D_TEXT, false);
+    _draw_list_card(d, 12, 196, 216, 30, "WIRELESS", "OPEN", UI_NEON_GRN, sel == 4);
+    _draw_list_card(d, 12, 236, 216, 18, "ACTION", "OK TO OPEN", D_TEXT, false);
     _draw_footer_hint(d, "OK=OPEN", "HOLD=BACK");
+}
+
+static void _render_esp_cfg_ref(Display *d, const FullUiSnapshot *rs) {
+    const char *mode_text = _esp_mode_ui_label((EspMode)rs->settings.esp_mode);
+    const char *effective_esp = _esp_mode_ui_label((EspMode)rs->esp_mode);
+    const char *power_text = rs->esp_powered ? "ON" : "OFF";
+    const char *link_text = rs->esp_link_up ? "ONLINE" : "WAIT";
+    uint16_t mode_col = (rs->settings.esp_mode == ESP_MODE_OFF) ? D_SUBTEXT :
+                        (rs->settings.esp_mode == ESP_MODE_OTA) ? UI_NEON_AMB : D_GREEN;
+    uint16_t effective_col = (rs->esp_mode == ESP_MODE_OFF) ? D_SUBTEXT :
+                             (rs->esp_mode == ESP_MODE_OTA) ? UI_NEON_AMB : D_GREEN;
+    uint16_t link_col = rs->esp_link_up ? D_GREEN : D_ORANGE;
+    const char *note_text = rs->edit_active ? "UP/DN CHANGES ESP MODE" :
+                            "BOOT MENU: HOLD DOWN WHILE POWERING ON";
+
+    _draw_grid_background(d);
+    _draw_screen_title(d, "WIRELESS", NULL);
+    _draw_list_card(d, 12, 40, 216, 24, "ESP MODE", mode_text, mode_col, rs->cur[S_ESP_CFG] == 0);
+    _draw_list_card(d, 12, 68, 216, 24, "BOOT MENU", "HOLD DOWN ON POWER-ON", UI_NEON_AMB, false);
+    _draw_list_card(d, 12, 96, 216, 20, "ESP ACTIVE", effective_esp, effective_col, false);
+    _draw_list_card(d, 12, 120, 216, 20, "POWER", power_text,
+                    rs->esp_powered ? D_GREEN : D_SUBTEXT, false);
+    _draw_list_card(d, 12, 144, 216, 20, "LINK", link_text, link_col, false);
+    _draw_list_card(d, 12, 168, 216, 20, "STATUS", rs->esp_status, D_TEXT, false);
+    _draw_list_card(d, 12, 194, 216, 18, "UART", "UART1 GP20 -> RX / GP21 <- TX", D_SUBTEXT, false);
+    _draw_list_card(d, 12, 216, 216, 18, "ENABLE", "GP22 -> ESP EN / REG EN", D_SUBTEXT, false);
+    _draw_list_card(d, 12, 240, 216, 18, "NOTE", note_text,
+                    rs->edit_active ? D_ACCENT : D_SUBTEXT, false);
+    _draw_menu_footer(d, rs, "OK=EDIT/APPLY", "HOLD=BACK");
+}
+
+// ── OTA update screen ────────────────────────────────────────
+static void _render_ota_ref(Display *d, const FullUiSnapshot *rs) {
+    char bytes_buf[32];
+    char pct_buf[8];
+    const PicoOtaState ota_state = (PicoOtaState)rs->ota_state;
+    const bool link = rs->esp_link_up;
+    const char *link_text = link ? "CONNECTED" : "WAITING...";
+    uint16_t link_col = link ? D_GREEN : D_ORANGE;
+
+    _draw_grid_background(d);
+    _draw_screen_title(d, "PICO OTA UPDATE", rs->ota_version[0] ? rs->ota_version : NULL);
+
+    // ESP connection status
+    _draw_list_card(d, 12, 40, 216, 22, "ESP LINK", link_text, link_col, false);
+
+    // OTA state
+    const char *state_text;
+    uint16_t state_col;
+    switch (ota_state) {
+        case PICO_OTA_STATE_IDLE:
+            state_text = "WAITING FOR FIRMWARE";
+            state_col = D_SUBTEXT;
+            break;
+        case PICO_OTA_STATE_ERASING:
+            state_text = "PREPARING FLASH...";
+            state_col = D_ORANGE;
+            break;
+        case PICO_OTA_STATE_RECEIVING:
+            state_text = "RECEIVING";
+            state_col = D_ACCENT;
+            break;
+        case PICO_OTA_STATE_FINALIZING:
+            state_text = "VERIFYING CRC...";
+            state_col = D_ORANGE;
+            break;
+        case PICO_OTA_STATE_READY:
+            state_text = rs->ota_reboot_pending ? "REBOOTING..." : "UPDATE COMPLETE";
+            state_col = D_GREEN;
+            break;
+        case PICO_OTA_STATE_ERROR:
+            state_text = "ERROR";
+            state_col = D_RED;
+            break;
+        default:
+            state_text = "UNKNOWN";
+            state_col = D_SUBTEXT;
+            break;
+    }
+    _draw_list_card(d, 12, 66, 216, 24, "STATE", state_text, state_col, false);
+
+    // Progress bar (only meaningful when receiving or later)
+    if (ota_state >= PICO_OTA_STATE_RECEIVING && rs->ota_image_size > 0u) {
+        float frac = (float)rs->ota_bytes_written / (float)rs->ota_image_size;
+        if (frac > 1.0f) frac = 1.0f;
+        uint16_t bar_col = (ota_state == PICO_OTA_STATE_ERROR) ? D_RED :
+                           (ota_state == PICO_OTA_STATE_READY)  ? D_GREEN : D_ACCENT;
+        _draw_progress_bar(d, 20, 100, 200, 12, frac, bar_col);
+
+        snprintf(pct_buf, sizeof(pct_buf), "%u%%", (unsigned)rs->ota_progress_pct);
+        disp_text_right_safe(d, 100, pct_buf, D_TEXT);
+
+        snprintf(bytes_buf, sizeof(bytes_buf), "%lu / %lu",
+                 (unsigned long)rs->ota_bytes_written,
+                 (unsigned long)rs->ota_image_size);
+        _draw_list_card(d, 12, 118, 216, 20, "BYTES", bytes_buf, D_TEXT, false);
+    } else {
+        disp_text(d, 40, 104, "Upload firmware via WiFi", D_SUBTEXT);
+    }
+
+    // Slot info
+    {
+        char slot_buf[24];
+        snprintf(slot_buf, sizeof(slot_buf), "RUN:%s TGT:%s",
+                 pico_ota_slot_name(pico_ota_running_slot()),
+                 pico_ota_slot_name(pico_ota_target_slot()));
+        _draw_list_card(d, 12, 146, 216, 20, "SLOTS", slot_buf, D_SUBTEXT, false);
+    }
+
+    // Error message
+    if (ota_state == PICO_OTA_STATE_ERROR && rs->ota_error[0]) {
+        _draw_list_card(d, 12, 172, 216, 24, "ERROR", rs->ota_error, D_RED, false);
+    }
+
+    // Reboot pending
+    if (rs->ota_reboot_pending) {
+        disp_fill_rect(d, 0, 200, ST7789_W, 20, D_GREEN);
+        disp_text_center_safe(d, 204, "REBOOTING INTO NEW SLOT...", D_BG);
+    }
+
+    _draw_footer_hint(d, "HOLD OK=OFF", "OTA SAFE MODE");
 }
 
 static void _render_events(Display *d, const FullUiSnapshot *rs) {
@@ -3332,6 +3571,8 @@ void ui_render(UI *ui) {
             case S_CAL_EDIT: _render_cal_edit_ref(d, &rs);    break;
             case S_DATA_CFG: _render_data_cfg_ref(d, &rs);    break;
             case S_ADVANCED: _render_advanced_ref(d, &rs);    break;
+            case S_ESP_CFG:  _render_esp_cfg_ref(d, &rs);     break;
+            case S_OTA:      _render_ota_ref(d, &rs);        break;
             case S_EVENTS:   _render_events(d, &rs);   break;
             case S_HISTORY:  _render_history(d, &rs);  break;
             case S_I2C_SCAN: _render_i2c_scan(d, &rs); break;

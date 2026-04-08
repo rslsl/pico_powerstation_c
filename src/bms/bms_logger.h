@@ -25,7 +25,7 @@ typedef enum {
 } LogEventType;
 
 typedef struct __attribute__((packed)) {
-    uint32_t timestamp_s;
+    uint32_t timestamp_s;   /* uptime_s if < 1700000000, epoch if >= */
     uint8_t  type;
     uint8_t  soc_pct;
     uint8_t  temp_bat;
@@ -34,7 +34,7 @@ typedef struct __attribute__((packed)) {
     float    current;
     float    param;
     uint32_t alarm_flags;
-    uint8_t  _pad[4];
+    uint32_t seq;           /* monotonic event counter (total_events at write) */
     uint32_t crc;
 } LogEvent;
 
@@ -60,6 +60,8 @@ void     log_flush_header(BmsLogger *l);
 void     log_reset(BmsLogger *l);
 
 void log_set_brownout(bool state);
+void log_set_epoch(uint32_t epoch);
+bool log_has_epoch(void);
 
 void log_boot(BmsLogger *l, float soc, float v);
 void log_charge_start(BmsLogger *l, float soc, float v, float current);
